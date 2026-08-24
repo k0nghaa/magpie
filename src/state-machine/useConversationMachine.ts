@@ -42,6 +42,18 @@ export function useConversationMachine(engineFactory: () => SpeechInputEngine = 
     dispatch({ type: 'RESET' })
   }
 
+  // "이어서 말하기" — 엔진은 건드리지 않는다. continuous 세션이 여전히 살아있어(sending 진입
+  // 시 engine.stop()을 부르지 않음) 다시 말하면 브라우저가 알아서 인식을 이어간다.
+  function resumeSpeaking() {
+    dispatch({ type: 'RESUME_SPEAKING' })
+  }
+
+  // 텍스트 모드는 엔진(WebSpeechInputEngine)을 아예 쓰지 않는다 — 미지원 브라우저 폴백이므로
+  // 애초에 start()를 부를 대상이 없다.
+  function submitText(text: string) {
+    dispatch({ type: 'TEXT_SUBMITTED', text })
+  }
+
   useEffect(() => {
     // cleanup 시점에 engineRef.current를 다시 읽는 게 의도된 동작이다 — start()가 마운트
     // 이후 언제든 새 엔진을 넣을 수 있으므로, 언마운트 시점의 "현재" 엔진을 멈춰야 한다
@@ -52,5 +64,5 @@ export function useConversationMachine(engineFactory: () => SpeechInputEngine = 
     }
   }, [])
 
-  return { state, start, stop }
+  return { state, start, stop, resumeSpeaking, submitText }
 }

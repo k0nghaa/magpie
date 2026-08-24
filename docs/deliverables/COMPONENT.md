@@ -14,11 +14,11 @@
 | 컴포넌트 | 역할 | 비고 |
 |---|---|---|
 | `NotificationSetup` | 시간 설정, 권한 요청, 권한 상태별 안내 | `input type="time"`, 시간값 localStorage 유지 |
-| `ConversationScreen` | 상태머신 컨테이너 | |
+| `ConversationScreen` | 상태머신 컨테이너 | 아직 미작성(Day 4+) — 지금은 `SpeechInputDemo`가 임시로 대체 |
 | `ChatMessageList` / `ChatBubble` | user/assistant variant | |
 | `TurnIndicator` | 현재 상태를 시각적+aria-live로 표시 | 자동 전환의 핵심 UX |
-| `ResumeSpeakingButton` | 무음 오탐 시 복구용 | 상시 리스닝 구조에서 "오탐 복구+일시정지" 역할 |
-| `TextInputFallback` | 음성 미지원 환경 자동 노출 | 전송 버튼이 턴 종료 신호 |
+| `ResumeSpeakingButton` | 무음 오탐 시 복구용 (구현 완료, Day 3) | `user_speaking`/`sending`에서만 렌더링, 클릭 시 `listening` 복귀 |
+| `TextInputFallback` | 음성 미지원 환경 자동 노출 (구현 완료, Day 3) | 전송 버튼/Enter가 턴 종료 신호, 무음 감지 로직 없음 |
 | `StreamingIndicator` | 스트리밍 중 표시 | |
 | `ErrorBanner`, `EmptyState` | 예외 상태 | |
 
@@ -42,6 +42,9 @@
   listening --INTERIM_RESULT--> user_speaking (transcript 갱신)
   user_speaking --INTERIM_RESULT--> user_speaking (transcript 갱신, 무음 타이머 리셋)
   user_speaking --SILENCE_TIMEOUT(~1.2초 무음)--> sending
+  user_speaking --RESUME_SPEAKING(이어서 말하기)--> listening (transcript 보존)
+  sending --RESUME_SPEAKING(이어서 말하기)--> listening (transcript 보존)
+  (idle|listening|user_speaking) --TEXT_SUBMITTED(텍스트 전송/Enter)--> sending
   (모든 상태) --ENGINE_ERROR--> error
   error --START_LISTENING(재시도)--> listening
   (모든 상태) --RESET--> idle
@@ -62,7 +65,19 @@
     `speechend`)는 계속 전달만 받되 상태 전환 근거로는 쓰지 않고 참고용 로그로만 남긴다.
   - **알려진 리스크**: "텍스트가 안 바뀜"이 "실제로 말을 멈춤"과 완전히 같지는 않아 오탐(false
     cutoff) 가능성이 있다 — PRD 4장이 이미 이 리스크를 알고 "이어서 말하기" 버튼으로 완화하기로
-    설계해뒀다(`ResumeSpeakingButton`, 다음 단계 범위).
+    설계해뒀다(`ResumeSpeakingButton`, 아래 참고).
+- **`ResumeSpeakingButton`(오탐 복구, Day 3)**: `user_speaking`/`sending`에서만 렌더링되도록
+  가시성 규칙을 컴포넌트 자체에 내장(`VISIBLE_STATUSES`) — 리듀서가 다른 상태에서
+  `RESUME_SPEAKING`을 무시하는 것과 별개로, 버튼이 애초에 안 보이는 것까지 이중으로 보장한다.
+  클릭 시 `listening`으로 돌아가되 `transcript`는 지우지 않는다 — `WebSpeechInputEngine`은
+  `sending` 진입 시점에도 `stop()`되지 않고 `continuous` 세션이 계속 살아있으므로(같은
+  브라우저 인식 세션이 이어짐), 다시 말을 이어가면 브라우저가 알아서 누적 결과를 계속 준다.
+  즉 "이어서 말하기"는 엔진을 재시작하지 않는 순수 상태머신 레벨의 UI 복구다.
+- **`TextInputFallback`(음성 미지원 폴백, Day 3)**: `isSpeechInputSupported()`가 `false`일 때
+  자동으로 노출되는 `<form>` 기반 텍스트 입력. `onSubmit`(전송 클릭 또는 Enter)이 곧
+  `TEXT_SUBMITTED` 이벤트를 발생시켜 무음 타이머 없이 바로 `sending`으로 전환한다 — PRD 4장이
+  명시한 "전송 버튼/Enter가 곧 턴 종료 신호이므로 무음 감지 로직이 필요 없다"는 설계를 그대로
+  구현. `WebSpeechInputEngine`을 전혀 참조하지 않는다(미지원 폴백이므로 애초에 쓸 대상이 없음).
 - **엔진 의존성 주입**: `useConversationMachine(engineFactory)`가 엔진을 팩토리로 받는다(기본값
   `WebSpeechInputEngine`). PRD 3장의 "mock 구현으로 교체해도 상태머신이 무변경으로 동작하는지
   확인" 요구사항을 실제로 만족시키기 위한 설계 — 다른 `SpeechInputEngine` 구현체(mock, 나중엔
@@ -86,6 +101,14 @@
      `SpeechRecognition`은 클라우드 기반 — 5장 기술스택 문서에도 명시된 사실). 즉 **진짜 사람이
      실제 마이크로 말하고 1.2초 멈췄을 때 자동 전송되는지는 이 자동화 환경 밖에서, 로컬 Chrome +
      실제 마이크로 직접 확인이 필요**하다 — 확인 절차는 DEVLOG.md Day 3 항목에 안내.
+  4. `ResumeSpeakingButton`(Playwright, 가짜 `SpeechRecognition`으로 무음 오탐 재현): idle에서
+     버튼 미노출 확인 → 시작 후 `user_speaking`/`sending` 양쪽에서 노출 확인 → 클릭 시
+     `listening`으로 복귀하고 `transcript`가 보존됨을 확인 → 복귀 직후 버튼이 다시 숨겨짐을
+     확인. 페이지 에러 0건.
+  5. `TextInputFallback`(Playwright, `SpeechRecognition` 생성자를 `addInitScript`로 제거해
+     미지원 재현): 마이크 UI가 아예 안 뜨고 텍스트 입력창이 자동 노출됨을 확인 → 빈 입력일 때
+     전송 버튼 비활성화 → 입력 후 활성화 → Enter로 제출 시 `sending` 전환 및 transcript 반영,
+     입력창 비워짐까지 확인. 페이지 에러 0건.
 
 ## 4. 어댑터 분리 설계 근거
 

@@ -305,6 +305,63 @@
   확인. 중요도가 낮다고 판단(사람 확인)해 더 파고들지 않고 여기서 종료 — 코드는 무해하므로
   그대로 둠.
 
+### 4차 — `ResumeSpeakingButton`(오탐 복구) + `TextInputFallback`(텍스트 폴백) (2026-08-24)
+
+- 요청 내용: (1) 무음 오탐 시 "이어서 말하기"로 `listening` 강제 복귀시키는
+  `ResumeSpeakingButton`(PRD 4장·6장), `user_speaking`/`sending`에서만 노출되는지 상태머신과
+  정확히 연결해서 확인. (2) feature detection 미지원 시 자동 노출되는 `TextInputFallback`
+  (PRD 4장, 전송/Enter가 턴 종료 신호라 무음 감지 불필요). 미지원 상황 재현 방법이 불확실하면
+  지어내지 말고 모른다고 말할 것.
+- 완료 사항:
+  - `src/state-machine/types.ts`/`conversationReducer.ts`에 이벤트 2개 추가:
+    - `RESUME_SPEAKING`: `user_speaking`/`sending`에서만 `listening`으로 전이, 그 외 무시.
+      `transcript`는 보존(엔진이 `sending` 진입 시에도 `stop()`되지 않아 continuous 세션이
+      계속 살아있으므로, 다시 말하면 브라우저가 알아서 누적 인식을 이어감 — 지우면 오히려
+      손해).
+    - `TEXT_SUBMITTED`: `idle`/`listening`/`user_speaking`에서 무음 타이머 없이 바로
+      `sending`으로 전이(PRD 4장 "전송이 곧 턴 종료 신호"). 공백만 있는 제출은 무시.
+  - `src/state-machine/useConversationMachine.ts`: `resumeSpeaking()`/`submitText(text)` 함수
+    노출. `resumeSpeaking`은 엔진을 건드리지 않음(위 이유), `submitText`는
+    `WebSpeechInputEngine`을 아예 참조하지 않음(텍스트 폴백은 애초에 엔진을 쓸 이유가 없음).
+  - `src/components/ConversationScreen/ResumeSpeakingButton.tsx`: 가시성 규칙
+    (`user_speaking`/`sending`에서만 렌더링)을 컴포넌트 자체에 내장 — 리듀서의 상태 가드와
+    별개로 버튼이 애초에 안 보이는 것까지 이중 보장.
+  - `src/components/ConversationScreen/TextInputFallback.tsx`: `<form onSubmit>` 하나로
+    "전송 클릭"과 "Enter"를 동시에 처리(HTML 폼의 기본 동작을 그대로 이용 — 별도 keydown
+    핸들러 불필요). 빈/공백 입력은 제출 버튼 비활성화 + 제출 시에도 무시(이중 방어).
+  - `SpeechInputDemo.tsx`에 두 컴포넌트 배선: 미지원이면 `TextInputFallback`, 지원하면 마이크
+    UI 옆에 `ResumeSpeakingButton` 추가.
+  - `scripts/verify-silence-timer-logic.ts`에 새 이벤트 케이스 8개 추가(총 21개 검증) — 전부
+    PASS(`npm run verify:silence-timer`).
+  - **Playwright 실제 실행 검증**:
+    1. `ResumeSpeakingButton`: 가짜 `SpeechRecognition`으로 "발화 1번 → 침묵"을 재현해 무음
+       오탐을 만든 뒤 — idle에서 버튼 미노출 → `user_speaking`/`sending` 양쪽에서 노출 →
+       클릭 시 `listening` 복귀 + transcript 보존 확인 → 복귀 직후 버튼 다시 숨겨짐 확인.
+    2. `TextInputFallback`: `addInitScript`로 `SpeechRecognition`/`webkitSpeechRecognition`
+       생성자를 제거해 미지원 상황을 재현(Day 3 1차에서 이미 검증에 썼던 것과 동일한 기법) →
+       마이크 UI 자체가 안 뜨고 텍스트 입력창이 자동 노출 → 빈 입력 시 전송 버튼 비활성화 →
+       입력 후 활성화 → Enter 제출로 `sending` 전환 + transcript 반영 + 입력창 초기화까지 확인.
+    둘 다 페이지 에러 0건.
+  - `npx tsc -b`, `npm run lint` 모두 통과(기존과 동일한 무해한 경고 1건만 유지).
+- DoD 체크: [x] 오탐 복구 버튼 동작(`user_speaking`/`sending`에서만 노출 확인) [x] 미지원 환경
+  텍스트 폴백 UI 완성(Day 3 1차에선 판단 로직만이었는데 이번에 실제 UI까지 완성) → **Day 3
+  DoD 전체 항목 충족**.
+- **브라우저 devtools로 미지원 상황을 직접 재현하는 방법(정확히 확인된 것만 안내)**:
+  1. 크롬에서 개발자 도구(F12) → Console 탭 이동.
+  2. `delete window.SpeechRecognition; delete window.webkitSpeechRecognition;` 입력 후 Enter.
+  3. 페이지를 새로고침하면 `isSpeechInputSupported()`가 `false`를 반환해 텍스트 입력 모드로
+     자동 전환됨을 확인할 수 있음(이 프로젝트가 실제로 Playwright 자동화 검증에도 쓴 것과 동일한
+     방법 — 지어낸 방법이 아님). `delete`가 안 먹으면(어떤 브라우저는 내장 전역을 `delete` 못
+     하게 막기도 함) `Object.defineProperty(window, 'webkitSpeechRecognition', { value: undefined })`
+     로 대체 가능(다만 이건 이번에 직접 테스트하지 않아 100% 보장은 못 함 — 첫 번째 `delete`
+     방법이 안 될 때만 시도해보길 권장).
+- 이슈/메모:
+  - `ResumeSpeakingButton`이 상태를 `listening`으로 되돌린 뒤, 사용자가 다시 아무 말도 안 하고
+    한참 있으면 그냥 `listening`에 계속 머문다(추가 타임아웃 없음) — PRD에도 이 경우의 처리가
+    명시돼 있지 않아 임의로 만들지 않음.
+  - `TextInputFallback`은 제출 후 `sending`에서 더 진행 안 함(Day 4 LLM 연동 전까지 공통된
+    "다음 상태 없음" 제약, 음성 모드와 동일).
+
 ## Day 4 — LLM 스트리밍
 
 - 요청 내용:

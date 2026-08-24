@@ -15,5 +15,7 @@ export type ConversationEvent =
   | { type: 'START_LISTENING' }
   | { type: 'INTERIM_RESULT'; text: string }
   | { type: 'SILENCE_TIMEOUT' }
+  | { type: 'RESUME_SPEAKING' }
+  | { type: 'TEXT_SUBMITTED'; text: string }
   | { type: 'ENGINE_ERROR'; error: SpeechInputError }
   | { type: 'RESET' }
