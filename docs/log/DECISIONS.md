@@ -49,3 +49,43 @@
 - 결정: (A) 단일 파일.
 - 이유: ARCHITECTURE.md 원문도 인터페이스 3개를 한 코드 블록에 묶어서 제시함. 구현체가 없는 지금 단계에서 폴더를 먼저 쪼개는 건 과설계. Day 3에서 구현체를 추가할 때 폴더 구조 제안대로 `speech-input/`, `speech-output/`, `reminder/` 하위에 구현 파일을 넣으면 됨 (필요하면 그때 타입도 같이 옮길 수 있음).
 - 영향받는 범위: `src/adapters/types.ts`. 되돌리기 쉬움(파일 이동뿐이라 리스크 낮다고 판단해 사람에게 먼저 묻지 않음) — 이견 있으면 알려주면 바로 조정.
+
+### 2026-08-24 `NotificationSetup` 세부 UI/저장 방식 3종
+
+- 배경/문제: PRD 6장 컴포넌트 목록엔 `NotificationSetup`이 "시간 설정, 권한 요청, 권한 상태별 안내"라고만 되어 있고, (1) 시간 입력 UI 형태, (2) 알림 시간 값의 저장 방식(새로고침 후 유지 여부), (3) `BrowserNotificationEngine.schedule()`이 이번 단계에서 실제 `new Notification()`까지 생성해야 하는지는 명시돼 있지 않음.
+- 검토한 대안: (1) `<input type="time">` vs 시/분 개별 `<select>` vs 자유 텍스트 입력. (2) `localStorage` vs `sessionStorage`(브라우저 재시작 시 소실) vs 컴포넌트 로컬 state만(새로고침 시 초기화). (3) `schedule()`이 타이머+실제 알림 생성까지 담당 vs 타이머만 담당(알림 생성은 다음 단계).
+- 결정: (1) `<input type="time">`. (2) `localStorage`. (3) 타이머만 담당, 실제 알림 생성은 다음 단계로 분리.
+- 이유: 사람 확인받음. (1) 네이티브 컴포넌트라 접근성 구현이 따로 필요 없고 이 PoC 스코프에서 커스텀 스타일링이 우선순위가 아님. (2) "새로고침 후에도 유지"가 요구사항이면 브라우저 재시작까지 견디는 저장소는 `localStorage`뿐(Zustand persist를 쓰더라도 내부적으로 동일). (3) "타이머"와 "알림 표시"를 분리해두면 어댑터 인터페이스가 최소 책임만 지고, 실제 표시 방식(SW vs 페이지)을 나중에 따로 결정할 수 있음.
+- 영향받는 범위: `src/components/NotificationSetup/NotificationSetup.tsx`, `src/adapters/reminder/BrowserNotificationEngine.ts`.
+
+### 2026-08-24 알림을 실제로 그리는 방식: SW `showNotification()` 단일 경로
+
+- 배경/문제: PRD 5장/7장은 "Notification API + Service Worker"를 세트로 확정 스택에 넣었지만, 실제 호출 방식(페이지에서 직접 `new Notification()` vs SW의 `registration.showNotification()`)은 명시돼 있지 않음.
+- 검토한 대안: (A) SW `showNotification()`만 사용. (B) 데스크톱은 `new Notification()` 직접 사용, SW가 준비돼 있을 때만 `showNotification()`으로 폴백(MDN 예제 패턴).
+- 결정: (A).
+- 이유: 사람 확인받음. MDN 공식 문서에 `new Notification()`은 "거의 모든 모바일 브라우저에서 `TypeError`를 던진다"고 명시돼 있고(모바일 페이지가 백그라운드에서 거의 안 돈다는 이유로 벤더가 의도적으로 막음, 바뀔 계획 없음), 이 프로젝트는 반응형/모바일을 배제하지 않음. 코드 경로 하나만 유지·테스트하는 게 두 경로를 유지하는 것보다 PoC 스코프에 맞음.
+- 영향받는 범위: `src/adapters/reminder/showBrowserNotification.ts`.
+
+### 2026-08-24 Service Worker 구축 전략: `vite-plugin-pwa`의 `injectManifest` (+ 매니페스트 미생성) — 사람 확인 없이 결정
+
+- 배경/문제: PRD 5장은 "서비스워커 등록·매니페스트 관리는 `vite-plugin-pwa`로 단순화"라고만 되어 있고, 어떤 전략(`generateSW` 자동 생성 vs `injectManifest` 커스텀 SW)을 쓸지, PWA 설치용 매니페스트(아이콘 등)를 실제로 생성할지는 명시돼 있지 않음.
+- 검토한 대안: (A) `generateSW`(Workbox가 SW를 자동 생성, 오프라인 캐싱 기본 포함) vs (B) `injectManifest`(커스텀 SW 소스 직접 작성, 프리캐시 목록은 옵션으로 제어).
+- 결정: (B) `injectManifest`, `injectManifest.globPatterns: []`(오프라인 캐싱 없음), `manifest: false`(PWA 설치용 매니페스트/아이콘 미생성).
+- 이유: `generateSW`는 Workbox가 SW 파일 전체를 자동 생성해서 우리가 필요한 `notificationclick` 커스텀 이벤트 리스너를 넣을 방법이 없음. 오프라인 캐싱과 PWA 설치(아이콘)는 PRD의 목표/비목표 어디에도 없고 이번 요청(SW 등록+알림 표시)과 무관해서 스코프를 넓히지 않기로 판단. 리스크가 낮고(되돌리기 쉬움, `strategies` 옵션 하나로 전환 가능) `vite-plugin-pwa` 자체는 PRD가 이미 확정한 도구라 스택 이탈이 아니라고 보고 사람에게 먼저 묻지 않았음 — 이견 있으면 알려주면 바로 조정.
+- 영향받는 범위: `vite.config.ts`(`VitePWA` 옵션), `src/sw.ts`, `tsconfig.sw.json`.
+
+### 2026-08-24 "지금 시작하기" 버튼 동작 (ConversationScreen 부재)
+
+- 배경/문제: PRD 4장 예외 시나리오는 "알림 권한 거부/미지원 브라우저 → 대체 안내 문구 + 수동 '지금 시작하기' 버튼 제공"이라고 되어 있는데, 그 버튼이 이동해야 할 `ConversationScreen`이 아직 없음(Day 3+ 예정).
+- 검토한 대안: (A) 버튼을 두고 클릭 시 "대화 화면은 아직 준비 중입니다" 같은 확인 문구만 `aria-live`로 표시. (B) 이번 단계에는 버튼 없이 안내 문구만 두고, 버튼 자체는 `ConversationScreen`이 생기는 Day 3+에 함께 추가.
+- 결정: (A).
+- 이유: 사람 확인받음. PRD가 요구한 버튼 자체는 지금 만들어 두고, 실제로 갈 곳이 없다는 사실은 숨기지 않고 문구로 명시 — 나중에 존재하지 않는 화면으로 조용히 이동하는 "가짜 완료"를 만들지 않기 위함.
+- 영향받는 범위: `src/components/NotificationSetup/NotificationSetup.tsx`(`handleStartNow`, `START_NOW_PLACEHOLDER`). Day 3+에서 `ConversationScreen` 라우팅이 생기면 실제 네비게이션으로 교체 필요.
+
+### 2026-08-24 `showBrowserNotification()` reject 처리 수준
+
+- 배경/문제: `showBrowserNotification()`이 실패(예: 예약 시점엔 `granted`였는데 발사 시점 사이에 브라우저 알림 권한이 바뀐 경우, MDN 명세상 `registration.showNotification()`이 reject)할 수 있는데, 기존 코드(`void showBrowserNotification(...)`)는 이 reject를 아무도 받지 않아 unhandled promise rejection이 됐다. PRD 4장 예외 시나리오 목록엔 이 케이스가 명시돼 있지 않지만, PRD 2장 목표("모든 예외 상태가 UI로 명시적으로 처리된다")를 근거로 스코프 확장이 아니라 기존 목표를 마저 채우는 것으로 판단.
+- 검토한 대안: (A) 콘솔 로그만 남기고 화면엔 아무 신호 없음. (B) 콘솔 로그 + 실패 시점에 `Notification.permission`을 다시 읽어 `permission` state 재동기화 — 권한이 실제로 바뀌었다면 이미 있는 차단 안내/"지금 시작하기" UI가 새 코드 없이 자동으로 뜸. (C) 원인 불문하고 항상 새로운 "표시 실패" 배너를 노출(재시도 여지 있는 별도 UI).
+- 결정: (B).
+- 이유: 사람 확인받음(재시도 로직은 이 PoC 스코프에서 과하다는 점엔 이견 없었음). (A)는 PRD 목표("모든 예외 상태가 UI로 명시적으로 처리된다")에 못 미침. (C)는 원인과 무관하게 항상 별도 UI를 노출해 과설계. (B)는 가장 현실적인 실패 원인(권한 변경)에 대해서는 이미 만들어둔 예외 시나리오 UI를 재사용해 새 코드 없이 해결하고, 그 외 드문 원인은 콘솔 로그로 충분하다고 판단.
+- 영향받는 범위: `src/components/NotificationSetup/NotificationSetup.tsx`(`getCurrentPermission`, `onFire` 콜백의 `.catch()`).

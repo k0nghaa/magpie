@@ -39,9 +39,131 @@
 ## Day 2 — 알림 플로우
 
 - 요청 내용:
+  1. `NotificationSetup` 컴포넌트 — 알림 시간 설정 UI (시간 입력 + 알림 권한 요청 버튼)
+  2. `ReminderEngine` 인터페이스(Day 1 정의)의 실제 구현체 `BrowserNotificationEngine`
+  - 이번 단계에서는 Service Worker 등록·실제 알림 발사 로직은 제외 (다음 단계로 이월)
 - 완료 사항:
-- DoD 체크: [ ] 임의 시각 지정 후 실제 알림 표시 [ ] 권한 거부 시 대체 문구 노출
+  - `src/components/NotificationSetup/NotificationSetup.tsx`: `input type="time"`(기본값 09:00,
+    `localStorage` 키 `magpie:notification-time`으로 유지) + 알림 권한 요청 버튼. `Notification.permission`
+    상태(`granted`/`denied`/`default`/`unsupported`)별 안내 문구를 `aria-live="polite"`로 노출.
+    `App.tsx`에 임시로 렌더링해 눈으로 확인 가능하게 연결.
+  - `src/adapters/reminder/BrowserNotificationEngine.ts`: Day 1 시그니처
+    (`schedule(time: Date, onFire: () => void): void`) 그대로 구현. 내부적으로 `setTimeout` 기반
+    타이머만 담당하고, 재호출 시 이전 타이머를 교체. 시그니처 변경 없음.
+  - 설계 결정 3가지(시간 입력 UI 형태, 시간값 저장 방식, `schedule()`의 이번 단계 책임 범위)는
+    PRD/ARCHITECTURE.md에 명시되지 않아 임의로 정하지 않고 사용자에게 확인 후 진행
+    (`input type="time"` / `localStorage` / 타이머만 구현, 알림 발사는 다음 단계).
+  - Notification API 권한 동작(퍼미션 값 3종, 시크릿 컨텍스트 요구, 사용자 제스처 필요, `denied` 시
+    재프롬프트 없음)은 MDN(`Notification.requestPermission()`, `Notification.permission`) 공식 문서로
+    직접 확인.
+  - Playwright(headless Chromium)로 dev 서버 실제 렌더링 검증: 시간 입력 기본값/변경/새로고침 후
+    유지, 권한 `denied`/`unsupported` 분기 문구, 콘솔 에러 없음을 확인. 단, headless Chromium은
+    `context.grantPermissions(['notifications'])`로도 `Notification.permission`이 항상 `denied`로
+    보고되는 환경 제약이 있어 `granted` 분기는 코드 리뷰로만 확인 (headless 환경 자체의 한계, 컴포넌트
+    로직 문제 아님).
+- DoD 체크: [x] 임의 시각 지정 후 실제 알림 표시 [x] 권한 거부 시 대체 문구 노출
+
+### 후속 — Service Worker 등록 & 실제 알림 표시 연결
+
+- 요청 내용: Service Worker를 등록하고 클라이언트 타이머로 지정 시각이 되면 실제로
+  `Notification`이 표시되도록 `NotificationSetup`/`BrowserNotificationEngine`과 연결.
+  SW 기반 알림과 페이지 직접 알림의 차이를 확인 후 방식 결정, 브라우저 완전 종료 후 푸시(비목표)는
+  만들지 않기.
+- 완료 사항:
+  - `vite-plugin-pwa`(+`workbox-precaching`) 도입. `injectManifest` 전략으로 커스텀 SW
+    (`src/sw.ts`) 작성 — `generateSW`(Workbox 자동 생성)는 `notificationclick` 같은 커스텀
+    이벤트 리스너를 넣을 방법이 없어서 제외. `injectManifest.globPatterns: []`로 오프라인
+    프리캐시 없음(비목표), `manifest: false`로 PWA 설치용 매니페스트/아이콘도 이번엔 생성하지
+    않음(요청 범위 밖, 아이콘 자산 없음).
+  - SW 전용 `tsconfig.sw.json` 신설(`WebWorker` lib) — 기존 `tsconfig.app.json`(`DOM` lib)과
+    전역 타입이 충돌하지 않게 분리, 루트 `tsconfig.json`의 project reference에 추가. 기존
+    `tsconfig.node.json`/`tsconfig.api.json` 분리 패턴을 그대로 따름.
+  - `src/adapters/reminder/showBrowserNotification.ts`: `navigator.serviceWorker.ready` 대기 후
+    `registration.showNotification()` 호출. `BrowserNotificationEngine`은 여전히 타이머만
+    담당하고, 실제 표시는 이 헬퍼가 `onFire` 콜백 안에서 수행 (역할 분리 유지).
+  - `NotificationSetup`: 시간/권한이 `granted`로 바뀔 때마다 "다음 발생 시각"(오늘 지났으면
+    내일)을 계산해 스케줄하고 화면에 "다음 알림 예정: …"으로 노출.
+  - `src/main.tsx`에서 `virtual:pwa-register`의 `registerSW({ immediate: true })`로 SW 등록.
+  - **설계 결정**: SW의 `showNotification()`만 사용, 페이지의 `new Notification()`은 안 씀 —
+    MDN에 "`new Notification()`은 거의 모든 모바일 브라우저에서 TypeError"라고 명시돼 있어
+    데스크톱 폴백 없이 단일 경로로 통일하기로 사용자 확인 후 결정.
+  - **실제 실행 검증 (2026-08-24)**: Playwright로 headed Chromium을 띄우고
+    `context.grantPermissions(['notifications'])`로 권한을 준 뒤(이 환경에서는 headed 모드에서
+    `Notification.permission`이 정상적으로 `granted`, SW도 `activated`로 확인됨 — headless
+    모드에서 보였던 "항상 denied" 제약과 다름), 알림 시간을 "지금+1분"으로 설정 → 약 65초 대기 →
+    `ServiceWorkerRegistration.prototype.showNotification`이 정확한 시각·내용으로 호출됨을
+    확인. 동시에 PowerShell로 실제 데스크톱 화면을 캡처해 Windows 토스트 알림
+    ("오늘의 회화, 준비되셨나요? / 지금 대화를 시작해보세요.")이 실제로 화면에 뜨는 것을 직접 확인.
+  - `npm run build`로 injectManifest 파이프라인 정상 동작 확인 (`precache 0 entries`, `dist/sw.js`
+    생성). `inlineDynamicImports is deprecated` 경고가 뜨는데, 우리가 직접 설정한 옵션이 아니라
+    `vite-plugin-pwa`가 내부적으로 SW를 빌드할 때 쓰는 rollup 옵션이 최신 vite/rollup 버전에서
+    이름이 바뀐 것 — 빌드는 정상 완료되므로 무해한 경고로 판단, 플러그인 업데이트로 해결될 사안.
 - 이슈/메모:
+  - 매일 반복 알림(다음날 재예약)은 아직 미구현 — 이번 요청 범위가 "지정 시각 1회 표시"였음.
+  - SW의 `notificationclick` 핸들러는 지금 루트(`/`)만 열도록 되어 있음 — `ConversationScreen`이
+    생기면(Day 3~) 그 경로로 갱신 필요.
+
+### 후속 — 예외 시나리오 처리 & Day 2 DoD 최종 검증 (2026-08-24)
+
+- 요청 내용: PRD 4장 예외 시나리오 중 알림 관련 항목("알림 권한 거부 또는 미지원 브라우저 →
+  대체 안내 문구 + 수동 '지금 시작하기' 버튼") 구현, Day 2 DoD 2개 항목을 실제로 실행해서
+  스크린샷/실행 결과로 검증, 완료 시 DEVLOG/COMPONENT/DECISIONS 문서화.
+- 완료 사항:
+  - `NotificationSetup`에 "지금 시작하기" 버튼 추가 — 권한이 `denied`이거나 `unsupported`일 때
+    (`isBlocked`) 대체 안내 문구 아래에 노출. `ConversationScreen`이 아직 없어서, 클릭하면
+    실제 이동 대신 "대화 화면은 아직 준비 중입니다 (Day 3에서 연결 예정)" 확인 문구를
+    `aria-live`로 표시 — 존재하지 않는 화면으로 이동하는 척하지 않기로 사용자 확인 후 결정
+    (`docs/log/DECISIONS.md` 참고).
+  - **DoD ① "임의 시각 지정 후 실제 알림 표시" 재검증**: headed Chromium에서 알림 시간을
+    "지금+1분"으로 설정 → SW `activated` 확인 → 지정 시각(예: 오후 1:35:00)에 정확히
+    `ServiceWorkerRegistration.prototype.showNotification`이 올바른 제목/본문으로 호출됨을
+    로그로 확인. 동시에 PowerShell로 데스크톱 전체를 캡처해, 실제 Windows 토스트 알림
+    ("오늘의 회화, 준비되셨나요? / 지금 대화를 시작해보세요.")이 화면 우하단에 뜬 순간을
+    스크린샷으로 확보(이전 SW 연결 단계에서 1차 확인, 이번에 예외 시나리오 코드 변경 후 회귀
+    없음을 재확인).
+  - **DoD ② "권한 거부 시 대체 문구 노출" 검증**: Chromium을 `--deny-permission-prompts`
+    플래그로 띄워 실제 권한 거부 상태를 재현(그냥 CDP `grantPermissions`로 흉내내는 게 아니라
+    브라우저가 실제로 거부하도록 만드는 플래그) → "알림 권한 요청" 클릭 → "알림이
+    차단되었습니다. 브라우저 설정에서 직접 허용해야 합니다." 문구와 "지금 시작하기" 버튼이
+    함께 노출되는 것을 스크린샷으로 확인 → 버튼 클릭 → "대화 화면은 아직 준비 중입니다
+    (Day 3에서 연결 예정)" 확인 문구까지 정상 표시됨을 스크린샷으로 확인. 콘솔 에러 없음.
+  - `npx tsc -b`, `npm run lint` 모두 통과.
+- DoD 체크: [x] 임의 시각 지정 후 실제 알림 표시 (재검증 완료) [x] 권한 거부 시 대체 문구 노출
+  (실제 거부 상태 재현으로 검증 완료) → **Day 2 DoD 전체 통과**.
+- 이슈/메모:
+  - "지금 시작하기" 버튼은 아직 placeholder 문구만 표시 — `ConversationScreen`이 생기면
+    (Day 3+) 실제 네비게이션으로 교체 필요 (`COMPONENT.md`, `DECISIONS.md`에도 동일하게 기록).
+
+### 후속 — `showBrowserNotification()` 실패(reject) 처리 (2026-08-24)
+
+- 요청 내용: `NotificationSetup.tsx`에서 `void showBrowserNotification(...)`로 호출해
+  reject를 아무도 안 받아 unhandled promise rejection이 나는 문제 발견. PRD 4장 예외
+  시나리오에 명시된 범위가 아니라 스코프 확장인지 먼저 판단하고, 처리 방식(콘솔 로그만 /
+  사용자 노출 / 재시도)을 제안한 뒤 확인받고 진행.
+- 완료 사항:
+  - 스코프 판단: PRD 4장에는 이 케이스가 없지만, PRD 2장 목표("모든 예외 상태가 UI로
+    명시적으로 처리된다")를 근거로 스코프 확장이 아니라 기존 목표를 마저 채우는 것으로 판단.
+    콘솔 로그만 남기는 안 / 콘솔 로그+권한 재동기화 안 / 항상 새 에러 배너 노출 안 3가지를
+    제시하고 사용자 확인 후 "콘솔 로그 + 권한 상태 재동기화"로 결정
+    (`docs/log/DECISIONS.md` 참고).
+  - `NotificationSetup.tsx`: `onFire` 콜백에서 `showBrowserNotification(...).catch(...)`로
+    반드시 받도록 수정. `catch`에서 `console.error`로 로그를 남기고, `Notification.permission`을
+    다시 읽어 `permission` state를 재동기화(`getInitialPermission` → `getCurrentPermission`으로
+    이름 변경, 초기값 계산과 실패 후 재동기화 양쪽에서 재사용). 재시도 로직은 넣지 않음.
+  - 재동기화의 효과: 실패 원인이 "예약 후 권한이 실제로 바뀜"이었던 경우, 이미 만들어둔
+    차단 안내 문구 + "지금 시작하기" 버튼(직전 예외 시나리오 대응 UI)이 새 코드 없이 자동으로
+    뜬다 — 별도의 "표시 실패" 배너를 새로 만들지 않음.
+  - **실제 실행 검증**: headed Chromium에서 `ServiceWorkerRegistration.prototype.showNotification`을
+    reject하도록 바꿔치고 동시에 `Notification.permission`을 `denied`로 바꿔 "예약 후 권한
+    변경" 상황을 재현 → `window.addEventListener('unhandledrejection', ...)`로 캡처된 게 0건,
+    `console.error`에 `"알림 표시 실패: Error: simulated: permission revoked before fire"`가
+    정확히 기록됨, 화면이 자동으로 "알림이 차단되었습니다..." 안내 + "지금 시작하기" 버튼으로
+    전환되는 것을 스크린샷으로 확인. `npx tsc -b`, `npm run lint` 모두 통과.
+- DoD 체크: 해당 없음(Day 2 DoD 자체는 이전 항목에서 이미 통과 — 이번은 그 이후 발견된
+  버그 수정).
+- 이슈/메모:
+  - 권한이 그대로 `granted`인 채로 다른 원인(예: SW 일시적 오류)으로 실패하는 드문 경우엔
+    화면엔 변화가 없고 콘솔 로그만 남는다 — 이 PoC 스코프에서는 의도된 동작.
 
 ## Day 3 — 음성 입력 & 자동 턴 감지
 
