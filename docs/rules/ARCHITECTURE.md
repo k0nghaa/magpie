@@ -109,6 +109,20 @@ api/
 - 에러 매핑(`SpeechRecognitionErrorCode` → `SpeechInputErrorReason`)은 MDN
   `SpeechRecognitionErrorEvent/error` 문서의 enum(`not-allowed`, `service-not-allowed`,
   `audio-capture`, `network`, `no-speech`, `aborted` 등)을 그대로 근거로 사용.
+- **자동화 환경의 한계**: Playwright가 번들하는 오픈소스 Chromium은 실제 음성으로
+  `SpeechRecognition`을 끝까지 검증할 수 없다(추정: Google Chrome 정식 빌드 전용 음성인식
+  인증키 부재). 합성 음성 WAV를 가짜 마이크 입력으로 흘려도 `onresult`/`onerror` 어느 쪽도
+  안 옴 — 진짜 사람 음성 검증은 로컬 Chrome + 실제 마이크로만 가능(`docs/log/DEVLOG.md` Day 3
+  참고).
+
+## 무음 타이머(~1.2초) — 로직 레이어에 위치 (2026-08-24)
+
+PRD 6장의 "무음 타이머(~1.2초) 기반 발화 종료 감지"는 로직 레이어(`src/state-machine/`)에
+둔다 — `src/state-machine/silenceTimer.ts`(순수 디바운스 타이머, 브라우저 API 미참조)와
+`src/state-machine/useConversationMachine.ts`(엔진+reducer+타이머 배선)로 분리했다. 판단
+기준은 브라우저 네이티브 `speechend` 이벤트가 아니라 `onInterimResult` 콜백 기반 커스텀
+디바운스로 결정 — 근거와 트레이드오프는 `docs/log/DECISIONS.md` 2026-08-24 항목, 상태
+다이어그램은 `docs/deliverables/COMPONENT.md` 3장 참고.
 
 ## 설계 변경 이력
 

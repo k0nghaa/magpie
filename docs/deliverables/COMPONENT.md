@@ -24,7 +24,68 @@
 
 ## 3. 상태관리 설계 근거
 
-*(작성 예정 — `useReducer`를 택한 이유, 상태머신 다이어그램, 불가능한 상태 조합을 어떻게 차단했는지)*
+- **`useReducer`를 택한 이유**: PRD 6장이 "streaming이면서 동시에 listening" 같은 불가능한
+  상태 조합을 원천 차단하라고 명시. 여러 `useState`로 관리하면 "지금 상태가 뭔지"를 여러 불리언의
+  조합으로 추론해야 해서 불가능한 조합이 실수로 만들어지기 쉽다. `useReducer` + 단일
+  `status` 필드(`ConversationStatus`)로 관리하면 "현재 상태에서 의미 없는 이벤트는 무시한다"는
+  규칙을 각 이벤트 케이스 안에 명시적으로 적을 수 있어 원천 차단이 코드로 드러난다
+  (`src/state-machine/conversationReducer.ts`의 각 `case`가 `if (state.status === ...)`로
+  가드하는 방식).
+- **이번 단계에서 구현한 상태(5개, 사람 확인 후 결정)**: `idle` / `listening` / `user_speaking` /
+  `sending` / `error`. PRD 6장의 `assistant_speaking`/`streaming`은 TTS(Day 5)/LLM 스트리밍
+  (Day 4) 어댑터가 아직 없어 지금 만들면 실제로 도달·테스트되지 않는 상태가 되므로 이번 단계
+  범위에서 제외(`docs/log/DECISIONS.md` 참고) — 해당 어댑터가 생기는 날 `conversationReducer`에
+  상태/이벤트를 추가한다(기존 케이스에 영향 없음, `switch` 구조이므로).
+- **상태 다이어그램(이번 단계 구현 범위)**:
+  ```
+  idle --START_LISTENING--> listening
+  listening --INTERIM_RESULT--> user_speaking (transcript 갱신)
+  user_speaking --INTERIM_RESULT--> user_speaking (transcript 갱신, 무음 타이머 리셋)
+  user_speaking --SILENCE_TIMEOUT(~1.2초 무음)--> sending
+  (모든 상태) --ENGINE_ERROR--> error
+  error --START_LISTENING(재시도)--> listening
+  (모든 상태) --RESET--> idle
+  ```
+  `sending`은 이번 단계에서 종착점이다 — 실제 LLM 전송(Day 4)이 붙기 전까지는 여기서 더
+  진행하지 않는 게 맞는 동작이다(가짜로 다음 상태로 넘어가지 않음).
+- **무음 타이머(~1.2초) 위치와 판단 기준(둘 다 사람 확인 후 결정)**:
+  - 위치: `WebSpeechInputEngine`(어댑터) 내부가 아니라 로직 레이어
+    (`src/state-machine/silenceTimer.ts` + 이를 사용하는 `useConversationMachine.ts`)에 둠 —
+    타이머가 `onInterimResult` 콜백만 소비하는 순수 알고리즘이라 브라우저 API를 몰라도 되고,
+    PRD 3장 "mock 구현으로 교체해도 상태머신이 무변경으로 동작" 기준과 정확히 부합하며, 네이티브
+    전환 시(`RNVoiceInputEngine`)에도 그대로 재사용 가능하기 때문. 어댑터에 두면 "1.2초"라는
+    제품 정책이 특정 플랫폼 구현체에 박혀 7장 어댑터 분리 원칙과 어긋난다.
+  - 판단 기준: 브라우저 네이티브 `speechend` 이벤트가 아니라 커스텀 디바운스 타이머 사용 —
+    `speechend`는 타이밍이 명세에 없고(PRD의 "~1.2초"를 보장 못 함) Safari에서는 신뢰도 자체가
+    낮다고 지난 단계에서 확인했음. `onInterimResult`가 호출될 때마다 1200ms 타이머를 리셋하고,
+    끝까지 리셋 없이 살아남으면 `SILENCE_TIMEOUT` 이벤트를 디스패치한다. `onSpeechEnd`(네이티브
+    `speechend`)는 계속 전달만 받되 상태 전환 근거로는 쓰지 않고 참고용 로그로만 남긴다.
+  - **알려진 리스크**: "텍스트가 안 바뀜"이 "실제로 말을 멈춤"과 완전히 같지는 않아 오탐(false
+    cutoff) 가능성이 있다 — PRD 4장이 이미 이 리스크를 알고 "이어서 말하기" 버튼으로 완화하기로
+    설계해뒀다(`ResumeSpeakingButton`, 다음 단계 범위).
+- **엔진 의존성 주입**: `useConversationMachine(engineFactory)`가 엔진을 팩토리로 받는다(기본값
+  `WebSpeechInputEngine`). PRD 3장의 "mock 구현으로 교체해도 상태머신이 무변경으로 동작하는지
+  확인" 요구사항을 실제로 만족시키기 위한 설계 — 다른 `SpeechInputEngine` 구현체(mock, 나중엔
+  `RNVoiceInputEngine`)를 넘기면 리듀서·타이머 코드는 그대로 재사용된다.
+- **실제 실행 검증**:
+  1. 순수 로직 결정론적 테스트(`npm run verify:silence-timer`,
+     `scripts/verify-silence-timer-logic.ts`): reducer의 모든 상태 전이(정상 전이 + "불가능한
+     전이 무시") 10개, 디바운스 타이머의 리셋/타임아웃/취소 동작 3개, 총 13개 케이스 모두 통과.
+  2. Playwright(headless Chromium)로 브라우저 이벤트 타이밍까지 확인: 브라우저의 실제
+     `SpeechRecognition` 이벤트 계약과 동일한 모양의 가짜 생성자를 주입해 "t=0ms, t=150ms에
+     interim 결과 2번(발화 중) → 그 이후 완전한 침묵"을 재현 → 실제로 t≈1619ms(마지막 interim
+     이후 1241ms)에 `sending` 상태로 전환됨을 확인(목표 1200ms 대비 오차 41ms, DOM
+     polling/이벤트 루프 오버헤드 범위 내). 콘솔 에러 0건, 네이티브 `speechend`가 한 번도
+     안 왔는데도(가짜 생성자가 이 이벤트를 안 냄) 정상적으로 sending 전환됨 — 커스텀 타이머가
+     `speechend`에 의존하지 않는다는 설계 의도를 그대로 증명.
+  3. **한계(정직하게 기록)**: Windows SAPI로 실제 음성 WAV(영어 문장 + 뒤에 진짜 무음 3초를
+     이어붙임)를 만들어 Chromium의 `--use-file-for-fake-audio-capture` 플래그로 진짜 마이크
+     입력처럼 흘려보내는 시도도 했으나, 10초 넘게 기다려도 `onresult`/`onerror` 어느 쪽도 오지
+     않고 "듣는 중" 상태에 계속 머물렀다. Playwright가 번들하는 것은 오픈소스 Chromium이라
+     Google Chrome 정식 빌드에만 있는 음성인식 서비스 인증키가 없어서일 가능성이 높다(Chrome의
+     `SpeechRecognition`은 클라우드 기반 — 5장 기술스택 문서에도 명시된 사실). 즉 **진짜 사람이
+     실제 마이크로 말하고 1.2초 멈췄을 때 자동 전송되는지는 이 자동화 환경 밖에서, 로컬 Chrome +
+     실제 마이크로 직접 확인이 필요**하다 — 확인 절차는 DEVLOG.md Day 3 항목에 안내.
 
 ## 4. 어댑터 분리 설계 근거
 

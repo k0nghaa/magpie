@@ -1,47 +1,23 @@
-import { useRef, useState } from 'react'
-import { WebSpeechInputEngine, isSpeechInputSupported } from '../../adapters/speech-input/WebSpeechInputEngine.ts'
-import type { SpeechInputError } from '../../adapters/types.ts'
+import { isSpeechInputSupported } from '../../adapters/speech-input/WebSpeechInputEngine.ts'
+import { useConversationMachine } from '../../state-machine/useConversationMachine.ts'
 
-// 임시 디버그 화면 — ConversationScreen(Day 3 잔여 범위: 무음 타이머+자동 전송, Day 4+: 상태머신
-// 통합)이 생기기 전까지 WebSpeechInputEngine의 feature-detection/권한 플로우를 실제 브라우저에서
-// 눈으로 확인하기 위한 용도. NotificationSetup을 Day 2에서 App.tsx에 임시로 붙였던 것과 같은 패턴.
+const STATUS_LABEL: Record<string, string> = {
+  idle: '대기 중',
+  listening: '듣는 중…',
+  user_speaking: '발화 인식 중',
+  sending: '전송 대기 상태 (LLM 연동은 Day 4 예정 — 아직 아무 것도 보내지 않음)',
+  error: '오류',
+}
+
+// 임시 디버그 화면 — ConversationScreen(Day 4+: LLM 스트리밍, Day 5: TTS까지 통합)이 생기기 전까지
+// useConversationMachine(WebSpeechInputEngine + 무음 타이머 + 상태머신)을 실제 브라우저에서 눈으로
+// 확인하기 위한 용도. NotificationSetup을 Day 2에서 App.tsx에 임시로 붙였던 것과 같은 패턴.
 function SpeechInputDemo() {
   const supported = isSpeechInputSupported()
-  const engineRef = useRef<WebSpeechInputEngine | null>(null)
-  if (engineRef.current === null) {
-    engineRef.current = new WebSpeechInputEngine()
-  }
+  const { state, start, stop } = useConversationMachine()
 
-  const [isListening, setIsListening] = useState(false)
-  const [transcript, setTranscript] = useState('')
-  const [error, setError] = useState<SpeechInputError | null>(null)
-
-  function handleStart() {
-    setError(null)
-    setTranscript('')
-    setIsListening(true)
-    engineRef.current?.start(
-      (text) => setTranscript(text),
-      () => {
-        // 무음 타이머(~1.2초) 기반 자동 전송은 Day 3의 남은 범위 — 여기서는 엔진이 speechend를
-        // 실제로 콜백하는지만 로그로 확인한다.
-        console.log('[SpeechInputDemo] onSpeechEnd 호출됨')
-      },
-      (nextError) => {
-        setError(nextError)
-        if (nextError.reason === 'permission-denied' || nextError.reason === 'unsupported') {
-          setIsListening(false)
-        }
-      },
-    )
-  }
-
-  function handleStop() {
-    engineRef.current?.stop()
-    setIsListening(false)
-  }
-
-  const isPermissionDenied = error?.reason === 'permission-denied'
+  const isActive = state.status !== 'idle' && state.status !== 'error'
+  const isPermissionDenied = state.error?.reason === 'permission-denied'
 
   return (
     <section className="flex w-full max-w-sm flex-col gap-4 rounded-xl border border-neutral-200 p-6">
@@ -58,24 +34,28 @@ function SpeechInputDemo() {
           <div className="flex gap-2">
             <button
               type="button"
-              onClick={handleStart}
-              disabled={isListening}
+              onClick={start}
+              disabled={isActive}
               className="rounded-md bg-neutral-900 px-4 py-2 text-white disabled:cursor-not-allowed disabled:bg-neutral-400"
             >
               마이크 테스트 시작
             </button>
             <button
               type="button"
-              onClick={handleStop}
-              disabled={!isListening}
+              onClick={stop}
+              disabled={!isActive}
               className="rounded-md border border-neutral-900 px-4 py-2 text-neutral-900 disabled:cursor-not-allowed disabled:border-neutral-300 disabled:text-neutral-400"
             >
-              중지
+              중지 / 초기화
             </button>
           </div>
 
+          <p aria-live="polite" className="text-sm font-medium text-neutral-800">
+            상태: {STATUS_LABEL[state.status]}
+          </p>
+
           <p aria-live="polite" className="min-h-6 text-sm text-neutral-700">
-            {transcript || (isListening ? '듣는 중…' : '')}
+            {state.transcript}
           </p>
 
           {isPermissionDenied && (
@@ -84,10 +64,10 @@ function SpeechInputDemo() {
             </p>
           )}
 
-          {error && !isPermissionDenied && (
+          {state.error && !isPermissionDenied && (
             <p aria-live="polite" className="text-sm text-neutral-600">
-              오류가 발생했습니다: {error.reason}
-              {error.message ? ` (${error.message})` : ''}
+              오류가 발생했습니다: {state.error.reason}
+              {state.error.message ? ` (${state.error.message})` : ''}
             </p>
           )}
         </>

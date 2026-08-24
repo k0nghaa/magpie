@@ -128,3 +128,59 @@
   **알려진 한계**: Safari/Edge에서 생성자는 있지만 런타임에 조용히 실패하는 경우, 이번 단계
   범위(feature detection)로는 못 잡는다 — 무음 타이머·재시도 로직을 만드는 다음 단계에서 실제
   브라우저로 재검증 필요 (`docs/rules/ARCHITECTURE.md`의 `WebSpeechInputEngine` 메모 참고).
+
+### 2026-08-24 무음 타이머(~1.2초) 로직의 위치: 로직 레이어(상태머신을 감싸는 hook)
+
+- 배경/문제: ARCHITECTURE.md는 "무음 감지 후 턴 전환 규칙"을 로직 레이어로 분류해뒀지만,
+  "무음을 측정하는 타이머" 자체를 어디에 둘지는 명시돼 있지 않았다. `WebSpeechInputEngine`
+  내부(어댑터)에 둘 수도 있고, 상태머신 쪽(로직 레이어)에 둘 수도 있어 임의로 정하지 않고 확인.
+- 검토한 대안: (A) 로직 레이어 — `onInterimResult` 콜백만 소비하는 순수 디바운스 타이머를
+  상태머신을 감싸는 hook(`useConversationMachine`)에 둠. (B) `WebSpeechInputEngine` 내부 —
+  엔진이 직접 1.2초를 알고 타이밍을 결정.
+- 결정: (A).
+- 이유: 사람 확인받음. 타이머가 브라우저 API를 전혀 참조하지 않는 순수 알고리즘이라
+  로직 레이어에 두는 게 자연스럽고, PRD 3장 "mock 구현으로 교체해도 상태머신이 무변경으로
+  동작" 검증 기준과 정확히 부합(mock 엔진이 `onInterimResult`만 호출해주면 그대로 재사용/
+  테스트 가능). "1.2초"라는 제품 UX 상수가 특정 플랫폼 어댑터에 박히지 않아 네이티브 전환
+  시(`RNVoiceInputEngine`)에도 동일 로직 재사용 가능.
+- 영향받는 범위: `src/state-machine/silenceTimer.ts`(순수 타이머), `src/state-machine/useConversationMachine.ts`
+  (엔진 + reducer + 타이머 배선). `WebSpeechInputEngine`은 변경 없음.
+
+### 2026-08-24 무음(=발화 종료) 판단 기준: 커스텀 디바운스 타이머 (브라우저 네이티브 `speechend` 미사용)
+
+- 배경/문제: `WebSpeechInputEngine`은 이미 브라우저의 네이티브 `speechend` 이벤트를
+  `onSpeechEnd`로 전달하고 있어, 이를 그대로 "무음 감지" 신호로 쓸 수도 있었다. 하지만 MDN에
+  `speechend`의 정확한 타이밍이 명시돼 있지 않고(PRD가 요구하는 "~1.2초"를 보장 못 함),
+  Safari에서는 이 이벤트 자체가 신뢰 안 된다는 것을 지난 단계에서 확인했었다 — 무엇을 "무음"의
+  근거로 삼을지 임의로 정하지 않고 확인.
+- 검토한 대안: (A) 커스텀 디바운스 — `onInterimResult`가 호출될 때마다 1200ms 타이머를 리셋,
+  타이머가 끝까지 살아남으면 무음으로 판단. (B) 브라우저 네이티브 `speechend` 이벤트를 그대로
+  무음 신호로 사용.
+- 결정: (A).
+- 이유: 사람 확인받음. PRD가 명시한 구체적 수치(~1.2초)를 지킬 수 있는 유일한 방법이고,
+  브라우저/엔진 구현 편차(Safari 버그, Edge 지원 논쟁)를 전부 우회한다. "텍스트가 안 바뀜"이
+  "실제로 말을 멈춤"과 완전히 같지 않아 오탐(false cutoff) 가능성은 있지만, 이는 PRD 4장이
+  이미 알고 있고 "이어서 말하기" 버튼(다음 단계 범위)으로 완화하기로 설계된 리스크임.
+- 영향받는 범위: `src/state-machine/silenceTimer.ts`, `src/state-machine/useConversationMachine.ts`.
+  `onSpeechEnd`(네이티브 `speechend`)는 계속 전달만 받되 상태 전환에는 쓰지 않고 참고용
+  콘솔 로그로만 남김.
+
+### 2026-08-24 대화 상태머신(`useReducer`) 범위: 오늘 실제로 쓰이는 5개 상태만 구현
+
+- 배경/문제: PRD 6장은 assistant_speaking/listening/user_speaking/sending/streaming/error
+  6개 상태를 정의하지만, streaming(LLM 응답 수신)과 assistant_speaking(TTS 재생)은 아직
+  어댑터(LLM 스트리밍 클라이언트는 Day 4, `SpeechOutputEngine` 구현체는 Day 5)가 없어 지금
+  만들면 실제로 도달·테스트되지 않는 상태가 된다 — 상태머신을 이번 단계에서 얼마나 만들지
+  임의로 정하지 않고 확인.
+- 검토한 대안: (A) 오늘 실제로 배선되는 상태만 — idle/listening/user_speaking/sending/error
+  5개. (B) PRD 6장 6개 상태 타입을 지금 다 정의해두고, streaming/assistant_speaking은 타입만
+  있고 실제로 도달하지 않는 상태로 남김.
+- 결정: (A).
+- 이유: 사람 확인받음. CLAUDE.md의 "No half-finished implementations"·"design for hypothetical
+  future requirements 금지" 원칙에 부합 — 지금 당장 아무도 못 보내는 상태를 미리 만들어두는
+  건 미완성 코드를 완성된 것처럼 남겨두는 것과 같다고 판단. Day 4(LLM 스트리밍)에서 sending →
+  streaming, Day 5(TTS)에서 streaming → assistant_speaking → listening을 추가할 때
+  `conversationReducer`를 확장하면 됨 — reducer는 이벤트별 switch 구조라 상태 추가가
+  기존 케이스에 영향을 주지 않음.
+- 영향받는 범위: `src/state-machine/types.ts`(`ConversationStatus`), `src/state-machine/conversationReducer.ts`.
+  Day 4~5에서 상태/이벤트 추가 예정.

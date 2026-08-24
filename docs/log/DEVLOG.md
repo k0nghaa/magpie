@@ -223,6 +223,68 @@
   - `SpeechInputDemo`는 임시 디버그 컴포넌트 — `ConversationScreen`이 생기면 제거하고 실제
     화면으로 통합 필요.
 
+### 2차 — 무음 타이머(~1.2초) 기반 발화 종료 감지 → `sending` 전환 (2026-08-24)
+
+- 요청 내용: PRD 6장 상태머신(`listening → user_speaking → sending`)에 무음 타이머(~1.2초)를
+  연결. 코드 작성 전 (1) 이 로직을 로직 레이어/어댑터 중 어디에 둘지, (2) 무음 판단을 커스텀
+  타이머로 할지 브라우저 네이티브 이벤트로 할지 트레이드오프를 먼저 설명하고 확인받기.
+- 완료 사항:
+  - **사람 확인 후 결정한 것 3가지** (근거는 `docs/log/DECISIONS.md` 참고):
+    1. 위치: 로직 레이어(`useConversationMachine` hook) — `WebSpeechInputEngine` 내부 아님.
+    2. 무음 판단: `onInterimResult` 기반 커스텀 디바운스(1200ms) — 브라우저 네이티브
+       `speechend` 이벤트 아님.
+    3. 상태머신 범위: 오늘 실제로 쓰이는 5개 상태만(`idle`/`listening`/`user_speaking`/
+       `sending`/`error`) — `assistant_speaking`/`streaming`은 어댑터가 생기는 Day 4~5에 추가.
+  - `src/state-machine/types.ts`: `ConversationStatus`/`ConversationMachineState`/
+    `ConversationEvent` 타입 신설.
+  - `src/state-machine/conversationReducer.ts`: 순수 리듀서. 각 이벤트가 의미를 갖는 상태에서만
+    반영되고 그 외엔 무시하는 방식으로 불가능한 상태 조합을 원천 차단(예: `sending`에서
+    `SILENCE_TIMEOUT` 재수신 무시).
+  - `src/state-machine/silenceTimer.ts`: 브라우저 API를 전혀 참조하지 않는 순수 디바운스
+    타이머(`SILENCE_TIMEOUT_MS = 1200`). `reset()`이 호출될 때마다 타이머를 되감고, 끝까지
+    살아남으면 `onTimeout` 호출.
+  - `src/state-machine/useConversationMachine.ts`: `SpeechInputEngine`(팩토리로 주입, 기본값
+    `WebSpeechInputEngine`) + 리듀서 + 무음 타이머를 배선하는 hook. `onInterimResult`마다
+    타이머 리셋, 타이머가 울면 `SILENCE_TIMEOUT` 디스패치, 엔진 에러 시 타이머 취소 후
+    `ENGINE_ERROR` 디스패치. 네이티브 `onSpeechEnd`(=`speechend`)는 참고용 로그만 남기고 상태
+    전환에는 미사용(사람 확인 후 결정).
+  - `src/components/SpeechInputDemo/SpeechInputDemo.tsx`를 새 hook을 쓰도록 교체 — 현재
+    상태(`idle`/듣는 중/발화 인식 중/전송 대기/오류)를 `aria-live`로 실시간 노출해 사람이
+    직접 확인할 수 있게 함.
+  - `scripts/verify-silence-timer-logic.ts`(`npm run verify:silence-timer`로 커밋된 검증
+    스크립트, Day 1의 `verify:stream` 패턴과 동일): 리듀서의 정상 전이 6개 + 불가능한 전이
+    무시 2개 + 에러/재시도/리셋 2개, 디바운스 타이머의 리셋/타임아웃/취소 3개 — 총 13개 케이스
+    실제 실행 결과 모두 PASS.
+  - Playwright(headless Chromium)로 브라우저 이벤트 타이밍 검증: `SpeechRecognition`과 동일한
+    모양의 가짜 생성자로 "t=0ms·150ms에 interim 결과 2번 → 이후 완전한 침묵"을 재현 →
+    마지막 interim 이후 1241ms 뒤(목표 1200ms, 오차 41ms — DOM polling 오버헤드 범위 내)에
+    `sending` 상태로 전환됨을 실측. 네이티브 `speechend`가 한 번도 안 왔는데도 정상 전환돼
+    "커스텀 타이머가 `speechend`에 의존하지 않는다"는 설계를 그대로 증명. 콘솔 에러 0건.
+  - **실기기 마이크 테스트 시도와 한계(정직하게 기록)**: Windows SAPI로 실제 영어 음성 WAV를
+    합성하고 뒤에 진짜 무음 3초를 이어붙여 Chromium의 `--use-file-for-fake-audio-capture`로
+    진짜 마이크처럼 흘려보내는 자동화 테스트도 시도했다. 10초 넘게 기다려도 `onresult`도
+    `onerror`도 오지 않고 "듣는 중"에 멈춰 있었다 — Playwright가 번들하는 오픈소스 Chromium에는
+    Google Chrome 정식 빌드 전용 음성인식 인증키가 없어서일 가능성이 높다(Chrome의
+    `SpeechRecognition`은 클라우드 기반, PRD 5장에도 명시된 사실). 즉 **이 부분은 자동화로
+    끝까지 검증할 수 없었고, 사람이 로컬 Chrome + 실제 마이크로 직접 확인해야 한다.**
+  - `npx tsc -b`, `npm run lint` 모두 통과.
+- DoD 체크: [x] 무음 시 자동 전송(로직 검증 완료, 실기기 마이크 확인은 아래 절차로 직접 확인
+  필요) [ ] 오탐 복구 버튼 — 여전히 다음 단계 범위(이번 요청에 포함 안 됨).
+- **실기기 확인 절차(직접 해봐야 하는 부분)**:
+  1. `npm run dev`로 로컬 서버 실행 후 브라우저(Chrome 권장)로 열기.
+  2. "마이크 입력 테스트" 섹션에서 "마이크 테스트 시작" 클릭 → 마이크 권한 허용.
+  3. 아무 말이나 하고, 화면에 "발화 인식 중" 상태와 실시간 인식 텍스트가 뜨는지 확인.
+  4. 말을 멈추고 1.2초 정도 기다렸을 때 상태가 "전송 대기 상태 (LLM 연동은 Day 4 예정)"로
+     자동으로 바뀌는지 확인(아직 실제로 어디 전송되진 않음 — Day 4에서 연결 예정).
+  5. 너무 빨리(1.2초 전에) 전환되거나 반대로 한참 안 바뀌면 오탐/지연 문제이니 알려주면
+     타이밍 값이나 판단 기준을 다시 조정.
+- 이슈/메모:
+  - "이어서 말하기"(오탐 복구) 버튼은 여전히 미구현 — 커스텀 디바운스 방식의 알려진 리스크
+    (뜸 들이다 오탐)를 완화하는 안전장치라 다음으로 미루면 안 될 수도 있음, 필요 시 알려주면
+    바로 진행.
+  - `sending`은 지금 종착점(더 이상 진행 안 함) — Day 4에서 LLM 스트리밍이 붙으면
+    `sending → streaming → assistant_speaking → listening`을 `conversationReducer`에 추가.
+
 ## Day 4 — LLM 스트리밍
 
 - 요청 내용:

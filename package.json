@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "verify:stream": "tsx scripts/verify-claude-stream.ts"
+    "verify:stream": "tsx scripts/verify-claude-stream.ts",
+    "verify:silence-timer": "tsx scripts/verify-silence-timer-logic.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
