@@ -1,7 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { BrowserNotificationEngine } from '../../adapters/reminder/BrowserNotificationEngine.ts'
+import { showBrowserNotification } from '../../adapters/reminder/showBrowserNotification.ts'
 
 const STORAGE_KEY = 'magpie:notification-time'
 const DEFAULT_TIME = '09:00'
+const REMINDER_TITLE = '오늘의 회화, 준비되셨나요?'
 
 type PermissionState = NotificationPermission | 'unsupported'
 
@@ -13,13 +16,43 @@ function getInitialPermission(): PermissionState {
   return 'Notification' in window ? Notification.permission : 'unsupported'
 }
 
+// "HH:mm"을 오늘 그 시각으로 변환하되, 이미 지났으면 내일로 넘긴다 (알림은 항상 미래 시각이어야 함).
+function getNextOccurrence(hhmm: string): Date {
+  const [hours, minutes] = hhmm.split(':').map(Number)
+  const next = new Date()
+  next.setHours(hours, minutes, 0, 0)
+  if (next.getTime() <= Date.now()) {
+    next.setDate(next.getDate() + 1)
+  }
+  return next
+}
+
 function NotificationSetup() {
   const [time, setTime] = useState(getInitialTime)
   const [permission, setPermission] = useState<PermissionState>(getInitialPermission)
+  const engineRef = useRef<BrowserNotificationEngine | null>(null)
+  if (engineRef.current === null) {
+    engineRef.current = new BrowserNotificationEngine()
+  }
+
+  const nextOccurrence = useMemo(
+    () => (permission === 'granted' ? getNextOccurrence(time) : null),
+    [time, permission],
+  )
 
   useEffect(() => {
     window.localStorage.setItem(STORAGE_KEY, time)
   }, [time])
+
+  useEffect(() => {
+    if (!nextOccurrence) return
+    engineRef.current?.schedule(nextOccurrence, () => {
+      void showBrowserNotification(REMINDER_TITLE, {
+        body: '지금 대화를 시작해보세요.',
+        tag: 'magpie-daily-reminder',
+      })
+    })
+  }, [nextOccurrence])
 
   async function handleRequestPermission() {
     if (!('Notification' in window)) return
@@ -63,6 +96,12 @@ function NotificationSetup() {
           {isGranted && '알림이 허용되었습니다.'}
           {isDenied && '알림이 차단되었습니다. 브라우저 설정에서 직접 허용해야 합니다.'}
         </p>
+
+        {nextOccurrence && (
+          <p aria-live="polite" className="text-sm text-neutral-500">
+            다음 알림 예정: {nextOccurrence.toLocaleString('ko-KR')}
+          </p>
+        )}
       </div>
     </section>
   )
