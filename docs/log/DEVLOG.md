@@ -61,11 +61,47 @@
     `context.grantPermissions(['notifications'])`로도 `Notification.permission`이 항상 `denied`로
     보고되는 환경 제약이 있어 `granted` 분기는 코드 리뷰로만 확인 (headless 환경 자체의 한계, 컴포넌트
     로직 문제 아님).
-- DoD 체크: [ ] 임의 시각 지정 후 실제 알림 표시 (다음 단계 — SW 등록/실제 발사 로직 이월)
-  [x] 권한 거부 시 대체 문구 노출
+- DoD 체크: [x] 임의 시각 지정 후 실제 알림 표시 [x] 권한 거부 시 대체 문구 노출
+
+### 후속 — Service Worker 등록 & 실제 알림 표시 연결
+
+- 요청 내용: Service Worker를 등록하고 클라이언트 타이머로 지정 시각이 되면 실제로
+  `Notification`이 표시되도록 `NotificationSetup`/`BrowserNotificationEngine`과 연결.
+  SW 기반 알림과 페이지 직접 알림의 차이를 확인 후 방식 결정, 브라우저 완전 종료 후 푸시(비목표)는
+  만들지 않기.
+- 완료 사항:
+  - `vite-plugin-pwa`(+`workbox-precaching`) 도입. `injectManifest` 전략으로 커스텀 SW
+    (`src/sw.ts`) 작성 — `generateSW`(Workbox 자동 생성)는 `notificationclick` 같은 커스텀
+    이벤트 리스너를 넣을 방법이 없어서 제외. `injectManifest.globPatterns: []`로 오프라인
+    프리캐시 없음(비목표), `manifest: false`로 PWA 설치용 매니페스트/아이콘도 이번엔 생성하지
+    않음(요청 범위 밖, 아이콘 자산 없음).
+  - SW 전용 `tsconfig.sw.json` 신설(`WebWorker` lib) — 기존 `tsconfig.app.json`(`DOM` lib)과
+    전역 타입이 충돌하지 않게 분리, 루트 `tsconfig.json`의 project reference에 추가. 기존
+    `tsconfig.node.json`/`tsconfig.api.json` 분리 패턴을 그대로 따름.
+  - `src/adapters/reminder/showBrowserNotification.ts`: `navigator.serviceWorker.ready` 대기 후
+    `registration.showNotification()` 호출. `BrowserNotificationEngine`은 여전히 타이머만
+    담당하고, 실제 표시는 이 헬퍼가 `onFire` 콜백 안에서 수행 (역할 분리 유지).
+  - `NotificationSetup`: 시간/권한이 `granted`로 바뀔 때마다 "다음 발생 시각"(오늘 지났으면
+    내일)을 계산해 스케줄하고 화면에 "다음 알림 예정: …"으로 노출.
+  - `src/main.tsx`에서 `virtual:pwa-register`의 `registerSW({ immediate: true })`로 SW 등록.
+  - **설계 결정**: SW의 `showNotification()`만 사용, 페이지의 `new Notification()`은 안 씀 —
+    MDN에 "`new Notification()`은 거의 모든 모바일 브라우저에서 TypeError"라고 명시돼 있어
+    데스크톱 폴백 없이 단일 경로로 통일하기로 사용자 확인 후 결정.
+  - **실제 실행 검증 (2026-08-24)**: Playwright로 headed Chromium을 띄우고
+    `context.grantPermissions(['notifications'])`로 권한을 준 뒤(이 환경에서는 headed 모드에서
+    `Notification.permission`이 정상적으로 `granted`, SW도 `activated`로 확인됨 — headless
+    모드에서 보였던 "항상 denied" 제약과 다름), 알림 시간을 "지금+1분"으로 설정 → 약 65초 대기 →
+    `ServiceWorkerRegistration.prototype.showNotification`이 정확한 시각·내용으로 호출됨을
+    확인. 동시에 PowerShell로 실제 데스크톱 화면을 캡처해 Windows 토스트 알림
+    ("오늘의 회화, 준비되셨나요? / 지금 대화를 시작해보세요.")이 실제로 화면에 뜨는 것을 직접 확인.
+  - `npm run build`로 injectManifest 파이프라인 정상 동작 확인 (`precache 0 entries`, `dist/sw.js`
+    생성). `inlineDynamicImports is deprecated` 경고가 뜨는데, 우리가 직접 설정한 옵션이 아니라
+    `vite-plugin-pwa`가 내부적으로 SW를 빌드할 때 쓰는 rollup 옵션이 최신 vite/rollup 버전에서
+    이름이 바뀐 것 — 빌드는 정상 완료되므로 무해한 경고로 판단, 플러그인 업데이트로 해결될 사안.
 - 이슈/메모:
-  - `BrowserNotificationEngine`은 아직 `NotificationSetup`과 연결(wiring)되지 않음 — 실제 알림 발사
-    로직을 붙이는 다음 단계에서 통합 예정.
+  - 매일 반복 알림(다음날 재예약)은 아직 미구현 — 이번 요청 범위가 "지정 시각 1회 표시"였음.
+  - SW의 `notificationclick` 핸들러는 지금 루트(`/`)만 열도록 되어 있음 — `ConversationScreen`이
+    생기면(Day 3~) 그 경로로 갱신 필요.
 
 ## Day 3 — 음성 입력 & 자동 턴 감지
 
