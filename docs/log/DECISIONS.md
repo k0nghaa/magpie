@@ -202,3 +202,7 @@
   기대만큼 안 잡힐 수 있다는 점은 사람에게 미리 전달함.
 - 영향받는 범위: `src/adapters/speech-input/WebSpeechInputEngine.ts`(`recognition.unspokenPunctuation
   = true`), `src/adapters/speech-input/webSpeechRecognition.d.ts`(타입 선언 추가).
+- **실기기 재확인 결과(2026-08-24, 사람이 직접 크롬에서 테스트)**: 켜도 실제로는 "?"가 안
+  붙음 — 우려했던 대로 Experimental 기능이 기대만큼 동작하지 않는 사례로 확인됨. 중요도가
+  낮다고 판단해(사람 확인) 코드는 그대로 두고(무해한 설정이라 되돌릴 이유 없음) 더 이상 파고들지
+  않기로 함.
