@@ -39,9 +39,33 @@
 ## Day 2 — 알림 플로우
 
 - 요청 내용:
+  1. `NotificationSetup` 컴포넌트 — 알림 시간 설정 UI (시간 입력 + 알림 권한 요청 버튼)
+  2. `ReminderEngine` 인터페이스(Day 1 정의)의 실제 구현체 `BrowserNotificationEngine`
+  - 이번 단계에서는 Service Worker 등록·실제 알림 발사 로직은 제외 (다음 단계로 이월)
 - 완료 사항:
-- DoD 체크: [ ] 임의 시각 지정 후 실제 알림 표시 [ ] 권한 거부 시 대체 문구 노출
+  - `src/components/NotificationSetup/NotificationSetup.tsx`: `input type="time"`(기본값 09:00,
+    `localStorage` 키 `magpie:notification-time`으로 유지) + 알림 권한 요청 버튼. `Notification.permission`
+    상태(`granted`/`denied`/`default`/`unsupported`)별 안내 문구를 `aria-live="polite"`로 노출.
+    `App.tsx`에 임시로 렌더링해 눈으로 확인 가능하게 연결.
+  - `src/adapters/reminder/BrowserNotificationEngine.ts`: Day 1 시그니처
+    (`schedule(time: Date, onFire: () => void): void`) 그대로 구현. 내부적으로 `setTimeout` 기반
+    타이머만 담당하고, 재호출 시 이전 타이머를 교체. 시그니처 변경 없음.
+  - 설계 결정 3가지(시간 입력 UI 형태, 시간값 저장 방식, `schedule()`의 이번 단계 책임 범위)는
+    PRD/ARCHITECTURE.md에 명시되지 않아 임의로 정하지 않고 사용자에게 확인 후 진행
+    (`input type="time"` / `localStorage` / 타이머만 구현, 알림 발사는 다음 단계).
+  - Notification API 권한 동작(퍼미션 값 3종, 시크릿 컨텍스트 요구, 사용자 제스처 필요, `denied` 시
+    재프롬프트 없음)은 MDN(`Notification.requestPermission()`, `Notification.permission`) 공식 문서로
+    직접 확인.
+  - Playwright(headless Chromium)로 dev 서버 실제 렌더링 검증: 시간 입력 기본값/변경/새로고침 후
+    유지, 권한 `denied`/`unsupported` 분기 문구, 콘솔 에러 없음을 확인. 단, headless Chromium은
+    `context.grantPermissions(['notifications'])`로도 `Notification.permission`이 항상 `denied`로
+    보고되는 환경 제약이 있어 `granted` 분기는 코드 리뷰로만 확인 (headless 환경 자체의 한계, 컴포넌트
+    로직 문제 아님).
+- DoD 체크: [ ] 임의 시각 지정 후 실제 알림 표시 (다음 단계 — SW 등록/실제 발사 로직 이월)
+  [x] 권한 거부 시 대체 문구 노출
 - 이슈/메모:
+  - `BrowserNotificationEngine`은 아직 `NotificationSetup`과 연결(wiring)되지 않음 — 실제 알림 발사
+    로직을 붙이는 다음 단계에서 통합 예정.
 
 ## Day 3 — 음성 입력 & 자동 턴 감지
 
