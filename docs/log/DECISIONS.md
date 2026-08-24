@@ -184,3 +184,21 @@
   기존 케이스에 영향을 주지 않음.
 - 영향받는 범위: `src/state-machine/types.ts`(`ConversationStatus`), `src/state-machine/conversationReducer.ts`.
   Day 4~5에서 상태/이벤트 추가 예정.
+
+### 2026-08-24 `unspokenPunctuation`(실험적 구두점 추론) 활성화
+
+- 배경/문제: 실기기로 무음 타이머를 테스트하던 중, 말끝을 올려 질문으로 말해도 인식 텍스트에
+  "?"가 안 붙는다는 걸 발견. 확인해보니 Web Speech API의 `SpeechRecognition`에
+  `unspokenPunctuation`이라는 속성이 있고(Chrome 151+, MDN에 "Experimental"로 표시, 호환성
+  표는 비어 있음), 기본값이 `false`라서 우리가 켜지 않는 한 구두점이 전혀 안 붙는다는 걸 확인.
+  GitHub explainer(`WebAudio/web-speech-api`)엔 "자연스러운 멈춤 + 문법 구조" 기반이라고만
+  나와 있고, 억양(피치)을 직접 분석한다는 근거는 못 찾음 — 확실치 않은 부분은 과장하지 않고
+  사람에게 그대로 전달한 뒤 켤지 확인.
+- 검토한 대안: (A) `recognition.unspokenPunctuation = true`로 켠다. (B) 안 켠다(PRD가 구두점
+  추론을 요구한 적 없어 범위 밖으로 볼 수도 있음).
+- 결정: (A).
+- 이유: 사람 확인받음. 미지원 브라우저에서 존재하지 않는 프로퍼티에 값을 대입하는 것뿐이라
+  에러 없이 조용히 무시되는 안전한 설정이라 리스크가 낮음. 다만 Experimental 기능이라 물음표가
+  기대만큼 안 잡힐 수 있다는 점은 사람에게 미리 전달함.
+- 영향받는 범위: `src/adapters/speech-input/WebSpeechInputEngine.ts`(`recognition.unspokenPunctuation
+  = true`), `src/adapters/speech-input/webSpeechRecognition.d.ts`(타입 선언 추가).

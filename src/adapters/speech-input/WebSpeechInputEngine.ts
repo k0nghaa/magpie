@@ -62,6 +62,10 @@ export class WebSpeechInputEngine implements SpeechInputEngine {
     const recognition = new Constructor()
     recognition.continuous = true
     recognition.interimResults = true
+    // 실험적 기능(사람 확인 후 켬, docs/log/DECISIONS.md 참고) — "?" 같은 구두점을 자연스러운
+    // 멈춤+문법 구조 기반으로 추론해 넣어준다. 미지원 브라우저에서는 존재하지 않는 프로퍼티에
+    // 값을 대입하는 것뿐이라 조용히 무시된다(에러 없음).
+    recognition.unspokenPunctuation = true
 
     recognition.onresult = (event) => {
       // 세션 시작(이번 start() 호출) 이후 누적된 전체 텍스트를 매번 통째로 넘긴다 — 호출자가

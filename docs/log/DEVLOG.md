@@ -285,6 +285,23 @@
   - `sending`은 지금 종착점(더 이상 진행 안 함) — Day 4에서 LLM 스트리밍이 붙으면
     `sending → streaming → assistant_speaking → listening`을 `conversationReducer`에 추가.
 
+### 3차 — 구두점(물음표 등) 자동 추론 활성화 (2026-08-24)
+
+- 요청 내용: 실기기 테스트 중 사용자가 "말끝을 올려 질문으로 말해도 '?'를 못 알아듣냐"고
+  질문 → 추측하지 않고 확인 후 답변, 활성화 여부 확인받고 진행.
+- 완료 사항:
+  - 확인 결과: Web Speech API `SpeechRecognition`에 `unspokenPunctuation` 속성이 있음
+    (Chrome 151+, MDN "Experimental" 표시, 호환성 표 비어 있음). 기본값 `false` — 켜지 않으면
+    구두점이 전혀 안 붙는다는 게 원인이었음. GitHub explainer는 "자연스러운 멈춤 + 문법 구조"
+    기반이라고만 설명하고, 억양(피치) 직접 분석 여부는 근거를 못 찾아 사람에게 그대로 전달.
+  - 사람 확인 후 `recognition.unspokenPunctuation = true`로 활성화(`WebSpeechInputEngine.ts`).
+    `webSpeechRecognition.d.ts`에 타입 선언 추가. 미지원 브라우저에서는 존재하지 않는
+    프로퍼티 대입이라 에러 없이 무시됨.
+  - `npx tsc -b`, `npm run lint` 모두 통과.
+- DoD 체크: 해당 없음(Day 3 DoD 자체에는 없는 항목, 사용자 질문에서 파생된 개선).
+- 이슈/메모: Experimental 기능이라 "?"가 기대만큼 항상 붙는다고 보장 못 함 — 실기기에서 계속
+  안 붙으면 알려달라고 안내함.
+
 ## Day 4 — LLM 스트리밍
 
 - 요청 내용:

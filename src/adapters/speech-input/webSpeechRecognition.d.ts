@@ -13,6 +13,10 @@ declare global {
     continuous: boolean;
     interimResults: boolean;
     lang: string;
+    // 실험적(Chrome 151+, MDN에 "Experimental" 명시, 호환성 표 비어 있음): 자연스러운 멈춤+문법
+    // 구조를 근거로 마침표/쉼표/물음표 등을 자동 추론해 삽입. 미지원 브라우저에서는 존재하지
+    // 않는 프로퍼티에 값을 대입하는 것뿐이라 에러 없이 무시된다.
+    unspokenPunctuation?: boolean;
     start(): void;
     stop(): void;
     abort(): void;

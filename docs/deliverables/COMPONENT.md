@@ -102,6 +102,14 @@
   이는 UA 스니핑을 피하기 위한 의도된 선택 — 실제로는 Safari의 `continuous` 모드에 런타임 버그가
   있다는 걸 알지만(MDN/WebKit 이슈 트래커로 확인), API 부재와 런타임 버그는 다른 문제라고 보고
   표준 feature-detection만 쓰기로 사람 확인 후 결정(`docs/log/DECISIONS.md` 참고).
+- **구두점 자동 추론(`unspokenPunctuation`, 실험적 기능, 사람 확인 후 결정)**: 사용자가 실기기
+  테스트 중 "말끝을 올려 질문해도 '?'가 안 붙는다"고 지적 → 확인해보니 Web Speech API 자체가
+  기본적으로 구두점 없는 텍스트만 주고, Chrome 151+에 추가된 `unspokenPunctuation`(MDN
+  "Experimental", 기본값 `false`)을 켜야 마침표/쉼표/물음표를 추론해서 넣어준다는 걸 확인.
+  `recognition.unspokenPunctuation = true`로 활성화. 미지원 브라우저에서는 존재하지 않는
+  프로퍼티 대입이라 에러 없이 무시됨. **알려진 불확실성**: 공식 explainer는 "자연스러운 멈춤 +
+  문법 구조" 기반이라고만 설명 — 억양(피치)만으로 의문문을 판별하는지는 근거를 못 찾아 100%
+  기대한 대로 물음표가 붙는다고 보장하지 않는다.
 - **`onInterimResult` 콜백 값**: 브라우저의 `SpeechRecognitionEvent.results`는
   `resultIndex`부터의 "변경분"만 담고 있지만, 매번 세션 시작 이후 누적된 전체 텍스트를 조립해서
   통째로 넘긴다 — 호출자가 브라우저 이벤트의 인덱싱 구조를 몰라도 화면에 그대로 표시할 수 있게
