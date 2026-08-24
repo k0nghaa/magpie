@@ -5,6 +5,7 @@ import { showBrowserNotification } from '../../adapters/reminder/showBrowserNoti
 const STORAGE_KEY = 'magpie:notification-time'
 const DEFAULT_TIME = '09:00'
 const REMINDER_TITLE = '오늘의 회화, 준비되셨나요?'
+const START_NOW_PLACEHOLDER = '대화 화면은 아직 준비 중입니다 (Day 3에서 연결 예정)'
 
 type PermissionState = NotificationPermission | 'unsupported'
 
@@ -30,6 +31,7 @@ function getNextOccurrence(hhmm: string): Date {
 function NotificationSetup() {
   const [time, setTime] = useState(getInitialTime)
   const [permission, setPermission] = useState<PermissionState>(getInitialPermission)
+  const [startNowMessage, setStartNowMessage] = useState<string | null>(null)
   const engineRef = useRef<BrowserNotificationEngine | null>(null)
   if (engineRef.current === null) {
     engineRef.current = new BrowserNotificationEngine()
@@ -61,9 +63,14 @@ function NotificationSetup() {
     setPermission(result)
   }
 
+  function handleStartNow() {
+    setStartNowMessage(START_NOW_PLACEHOLDER)
+  }
+
   const isUnsupported = permission === 'unsupported'
   const isGranted = permission === 'granted'
   const isDenied = permission === 'denied'
+  const isBlocked = isUnsupported || isDenied
 
   return (
     <section className="flex w-full max-w-sm flex-col gap-4 rounded-xl border border-neutral-200 p-6">
@@ -101,6 +108,19 @@ function NotificationSetup() {
           <p aria-live="polite" className="text-sm text-neutral-500">
             다음 알림 예정: {nextOccurrence.toLocaleString('ko-KR')}
           </p>
+        )}
+
+        {isBlocked && (
+          <div className="flex flex-col gap-2">
+            <button
+              type="button"
+              onClick={handleStartNow}
+              className="rounded-md border border-neutral-900 px-4 py-2 text-neutral-900"
+            >
+              지금 시작하기
+            </button>
+            {startNowMessage && <p aria-live="polite" className="text-sm text-neutral-500">{startNowMessage}</p>}
+          </div>
         )}
       </div>
     </section>
