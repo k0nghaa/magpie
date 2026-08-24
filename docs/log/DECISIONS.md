@@ -81,3 +81,11 @@
 - 결정: (A).
 - 이유: 사람 확인받음. PRD가 요구한 버튼 자체는 지금 만들어 두고, 실제로 갈 곳이 없다는 사실은 숨기지 않고 문구로 명시 — 나중에 존재하지 않는 화면으로 조용히 이동하는 "가짜 완료"를 만들지 않기 위함.
 - 영향받는 범위: `src/components/NotificationSetup/NotificationSetup.tsx`(`handleStartNow`, `START_NOW_PLACEHOLDER`). Day 3+에서 `ConversationScreen` 라우팅이 생기면 실제 네비게이션으로 교체 필요.
+
+### 2026-08-24 `showBrowserNotification()` reject 처리 수준
+
+- 배경/문제: `showBrowserNotification()`이 실패(예: 예약 시점엔 `granted`였는데 발사 시점 사이에 브라우저 알림 권한이 바뀐 경우, MDN 명세상 `registration.showNotification()`이 reject)할 수 있는데, 기존 코드(`void showBrowserNotification(...)`)는 이 reject를 아무도 받지 않아 unhandled promise rejection이 됐다. PRD 4장 예외 시나리오 목록엔 이 케이스가 명시돼 있지 않지만, PRD 2장 목표("모든 예외 상태가 UI로 명시적으로 처리된다")를 근거로 스코프 확장이 아니라 기존 목표를 마저 채우는 것으로 판단.
+- 검토한 대안: (A) 콘솔 로그만 남기고 화면엔 아무 신호 없음. (B) 콘솔 로그 + 실패 시점에 `Notification.permission`을 다시 읽어 `permission` state 재동기화 — 권한이 실제로 바뀌었다면 이미 있는 차단 안내/"지금 시작하기" UI가 새 코드 없이 자동으로 뜸. (C) 원인 불문하고 항상 새로운 "표시 실패" 배너를 노출(재시도 여지 있는 별도 UI).
+- 결정: (B).
+- 이유: 사람 확인받음(재시도 로직은 이 PoC 스코프에서 과하다는 점엔 이견 없었음). (A)는 PRD 목표("모든 예외 상태가 UI로 명시적으로 처리된다")에 못 미침. (C)는 원인과 무관하게 항상 별도 UI를 노출해 과설계. (B)는 가장 현실적인 실패 원인(권한 변경)에 대해서는 이미 만들어둔 예외 시나리오 UI를 재사용해 새 코드 없이 해결하고, 그 외 드문 원인은 콘솔 로그로 충분하다고 판단.
+- 영향받는 범위: `src/components/NotificationSetup/NotificationSetup.tsx`(`getCurrentPermission`, `onFire` 콜백의 `.catch()`).

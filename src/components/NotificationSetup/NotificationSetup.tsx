@@ -13,7 +13,7 @@ function getInitialTime(): string {
   return window.localStorage.getItem(STORAGE_KEY) ?? DEFAULT_TIME
 }
 
-function getInitialPermission(): PermissionState {
+function getCurrentPermission(): PermissionState {
   return 'Notification' in window ? Notification.permission : 'unsupported'
 }
 
@@ -30,13 +30,16 @@ function getNextOccurrence(hhmm: string): Date {
 
 function NotificationSetup() {
   const [time, setTime] = useState(getInitialTime)
-  const [permission, setPermission] = useState<PermissionState>(getInitialPermission)
+  const [permission, setPermission] = useState<PermissionState>(getCurrentPermission)
   const [startNowMessage, setStartNowMessage] = useState<string | null>(null)
   const engineRef = useRef<BrowserNotificationEngine | null>(null)
   if (engineRef.current === null) {
     engineRef.current = new BrowserNotificationEngine()
   }
 
+  /**
+   *  "재호출될 수 있는 상황"의 실제 트리거는 시간 입력 변경과 권한 허용 전환
+   */
   const nextOccurrence = useMemo(
     () => (permission === 'granted' ? getNextOccurrence(time) : null),
     [time, permission],
@@ -49,9 +52,16 @@ function NotificationSetup() {
   useEffect(() => {
     if (!nextOccurrence) return
     engineRef.current?.schedule(nextOccurrence, () => {
-      void showBrowserNotification(REMINDER_TITLE, {
+      showBrowserNotification(REMINDER_TITLE, {
         body: '지금 대화를 시작해보세요.',
         tag: 'magpie-daily-reminder',
+      }).catch((error: unknown) => {
+        // 예약 시점엔 granted였는데 발사 시점 사이에 브라우저 알림 권한이 바뀐 경우가
+        // 가장 현실적인 원인. 실제로 바뀌었다면 아래 재동기화로 기존 차단 안내/
+        // "지금 시작하기" UI가 새 코드 없이 그대로 뜬다. 안 바뀐 채로 실패한 드문
+        // 경우는 콘솔 로그만 남긴다 (이 PoC 스코프에서는 재시도까지는 과함).
+        console.error('알림 표시 실패:', error)
+        setPermission(getCurrentPermission())
       })
     })
   }, [nextOccurrence])

@@ -70,6 +70,30 @@
   시그니처를 임의로 확장하지 않기 위한 선택. 네이티브 전환 시 권한 플로우 자체가 완전히 다른 API가
   될 가능성이 높아, 지금 시점에 억지로 추상화하면 오히려 잘못된 추상화가 될 위험이 있음.
 
+### `showBrowserNotification()` 실패(reject) 처리
+
+- `registration.showNotification()`은 항상 성공하지 않는다 — 대표적으로 "`schedule()` 예약
+  시점엔 권한이 `granted`였는데, 탭이 열려있는 동안 사용자가 브라우저 설정에서 알림을 꺼서
+  발사 시점엔 권한이 없어진 경우" MDN 명세상 reject한다. PRD 4장 예외 시나리오 목록에는 이
+  케이스가 명시돼 있지 않지만, PRD 2장 목표("로딩·에러·빈 화면·권한거부 등 모든 예외 상태가
+  UI로 명시적으로 처리된다")는 이 실패도 커버해야 한다고 판단 — 사용자 확인 후 아래 방식으로
+  결정 (`docs/log/DECISIONS.md` 참고).
+- `NotificationSetup`의 `onFire` 콜백에서 `showBrowserNotification(...).catch(...)`로 반드시
+  받는다. 이전엔 `void showBrowserNotification(...)`로 프로미스를 그냥 버려서, reject 시
+  unhandled promise rejection이 되고 사용자에게 아무 신호도 안 갔음 — 이번에 고침.
+- `catch` 안에서 하는 일은 두 가지뿐: (1) `console.error`로 로그, (2)
+  `Notification.permission`을 다시 읽어 `permission` state를 재동기화. 재시도 로직은 넣지
+  않음(이 PoC 스코프에서는 과함, 사용자도 동의).
+- 재동기화가 핵심 트릭이다 — 실패 원인이 실제로 권한 변경이었다면, 이미 만들어둔 차단 안내
+  문구 + "지금 시작하기" 버튼(바로 위 예외 시나리오 대응 UI)이 **새 UI 코드 없이 그대로**
+  뜬다. 권한이 여전히 `granted`인 채로 다른 이유로 실패한 드문 경우엔 화면은 안 바뀌고
+  콘솔 로그만 남는다 — 이 경우까지 별도 에러 배너를 만드는 건 과설계로 판단해 안 함.
+- 실제 실행 검증: headed Chromium에서 `ServiceWorkerRegistration.prototype.showNotification`을
+  reject하도록 바꿔치기하고 동시에 `Notification.permission`을 `denied`로 바꿔 "예약 후 권한이
+  바뀐 상황"을 재현 → `window.addEventListener('unhandledrejection', ...)`로 잡힌 게 0건,
+  `console.error`에 정확한 메시지가 남고, 화면이 자동으로 차단 안내 + "지금 시작하기" 버튼으로
+  전환되는 것을 확인.
+
 ### `NotificationSetup` 설계 근거
 
 - 시간 입력은 `<input type="time">` 채택 — 네이티브 컴포넌트라 접근성(키보드 조작, 라벨 연결)을

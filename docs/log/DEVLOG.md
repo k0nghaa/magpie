@@ -134,6 +134,37 @@
   - "지금 시작하기" 버튼은 아직 placeholder 문구만 표시 — `ConversationScreen`이 생기면
     (Day 3+) 실제 네비게이션으로 교체 필요 (`COMPONENT.md`, `DECISIONS.md`에도 동일하게 기록).
 
+### 후속 — `showBrowserNotification()` 실패(reject) 처리 (2026-08-24)
+
+- 요청 내용: `NotificationSetup.tsx`에서 `void showBrowserNotification(...)`로 호출해
+  reject를 아무도 안 받아 unhandled promise rejection이 나는 문제 발견. PRD 4장 예외
+  시나리오에 명시된 범위가 아니라 스코프 확장인지 먼저 판단하고, 처리 방식(콘솔 로그만 /
+  사용자 노출 / 재시도)을 제안한 뒤 확인받고 진행.
+- 완료 사항:
+  - 스코프 판단: PRD 4장에는 이 케이스가 없지만, PRD 2장 목표("모든 예외 상태가 UI로
+    명시적으로 처리된다")를 근거로 스코프 확장이 아니라 기존 목표를 마저 채우는 것으로 판단.
+    콘솔 로그만 남기는 안 / 콘솔 로그+권한 재동기화 안 / 항상 새 에러 배너 노출 안 3가지를
+    제시하고 사용자 확인 후 "콘솔 로그 + 권한 상태 재동기화"로 결정
+    (`docs/log/DECISIONS.md` 참고).
+  - `NotificationSetup.tsx`: `onFire` 콜백에서 `showBrowserNotification(...).catch(...)`로
+    반드시 받도록 수정. `catch`에서 `console.error`로 로그를 남기고, `Notification.permission`을
+    다시 읽어 `permission` state를 재동기화(`getInitialPermission` → `getCurrentPermission`으로
+    이름 변경, 초기값 계산과 실패 후 재동기화 양쪽에서 재사용). 재시도 로직은 넣지 않음.
+  - 재동기화의 효과: 실패 원인이 "예약 후 권한이 실제로 바뀜"이었던 경우, 이미 만들어둔
+    차단 안내 문구 + "지금 시작하기" 버튼(직전 예외 시나리오 대응 UI)이 새 코드 없이 자동으로
+    뜬다 — 별도의 "표시 실패" 배너를 새로 만들지 않음.
+  - **실제 실행 검증**: headed Chromium에서 `ServiceWorkerRegistration.prototype.showNotification`을
+    reject하도록 바꿔치고 동시에 `Notification.permission`을 `denied`로 바꿔 "예약 후 권한
+    변경" 상황을 재현 → `window.addEventListener('unhandledrejection', ...)`로 캡처된 게 0건,
+    `console.error`에 `"알림 표시 실패: Error: simulated: permission revoked before fire"`가
+    정확히 기록됨, 화면이 자동으로 "알림이 차단되었습니다..." 안내 + "지금 시작하기" 버튼으로
+    전환되는 것을 스크린샷으로 확인. `npx tsc -b`, `npm run lint` 모두 통과.
+- DoD 체크: 해당 없음(Day 2 DoD 자체는 이전 항목에서 이미 통과 — 이번은 그 이후 발견된
+  버그 수정).
+- 이슈/메모:
+  - 권한이 그대로 `granted`인 채로 다른 원인(예: SW 일시적 오류)으로 실패하는 드문 경우엔
+    화면엔 변화가 없고 콘솔 로그만 남는다 — 이 PoC 스코프에서는 의도된 동작.
+
 ## Day 3 — 음성 입력 & 자동 턴 감지
 
 - 요청 내용:
