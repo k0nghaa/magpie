@@ -14,21 +14,173 @@
 | 컴포넌트 | 역할 | 비고 |
 |---|---|---|
 | `NotificationSetup` | 시간 설정, 권한 요청, 권한 상태별 안내 | `input type="time"`, 시간값 localStorage 유지 |
-| `ConversationScreen` | 상태머신 컨테이너 | |
+| `ConversationScreen` | 상태머신 컨테이너 | 아직 미작성(Day 4+) — 지금은 `SpeechInputDemo`가 임시로 대체 |
 | `ChatMessageList` / `ChatBubble` | user/assistant variant | |
 | `TurnIndicator` | 현재 상태를 시각적+aria-live로 표시 | 자동 전환의 핵심 UX |
-| `ResumeSpeakingButton` | 무음 오탐 시 복구용 | 상시 리스닝 구조에서 "오탐 복구+일시정지" 역할 |
-| `TextInputFallback` | 음성 미지원 환경 자동 노출 | 전송 버튼이 턴 종료 신호 |
+| `ResumeSpeakingButton` | 무음 오탐 시 복구용 (구현 완료, Day 3) | `user_speaking`/`sending`에서만 렌더링, 클릭 시 `listening` 복귀 |
+| `TextInputFallback` | 음성 미지원 환경 자동 노출 (구현 완료, Day 3) | 전송 버튼/Enter가 턴 종료 신호, 무음 감지 로직 없음 |
 | `StreamingIndicator` | 스트리밍 중 표시 | |
 | `ErrorBanner`, `EmptyState` | 예외 상태 | |
 
 ## 3. 상태관리 설계 근거
 
-*(작성 예정 — `useReducer`를 택한 이유, 상태머신 다이어그램, 불가능한 상태 조합을 어떻게 차단했는지)*
+- **`useReducer`를 택한 이유**: PRD 6장이 "streaming이면서 동시에 listening" 같은 불가능한
+  상태 조합을 원천 차단하라고 명시. 여러 `useState`로 관리하면 "지금 상태가 뭔지"를 여러 불리언의
+  조합으로 추론해야 해서 불가능한 조합이 실수로 만들어지기 쉽다. `useReducer` + 단일
+  `status` 필드(`ConversationStatus`)로 관리하면 "현재 상태에서 의미 없는 이벤트는 무시한다"는
+  규칙을 각 이벤트 케이스 안에 명시적으로 적을 수 있어 원천 차단이 코드로 드러난다
+  (`src/state-machine/conversationReducer.ts`의 각 `case`가 `if (state.status === ...)`로
+  가드하는 방식).
+- **이번 단계에서 구현한 상태(5개, 사람 확인 후 결정)**: `idle` / `listening` / `user_speaking` /
+  `sending` / `error`. PRD 6장의 `assistant_speaking`/`streaming`은 TTS(Day 5)/LLM 스트리밍
+  (Day 4) 어댑터가 아직 없어 지금 만들면 실제로 도달·테스트되지 않는 상태가 되므로 이번 단계
+  범위에서 제외(`docs/log/DECISIONS.md` 참고) — 해당 어댑터가 생기는 날 `conversationReducer`에
+  상태/이벤트를 추가한다(기존 케이스에 영향 없음, `switch` 구조이므로).
+- **상태 다이어그램(이번 단계 구현 범위)**:
+  ```
+  idle --START_LISTENING--> listening
+  listening --INTERIM_RESULT--> user_speaking (transcript 갱신)
+  user_speaking --INTERIM_RESULT--> user_speaking (transcript 갱신, 무음 타이머 리셋)
+  user_speaking --SILENCE_TIMEOUT(~1.2초 무음)--> sending
+  user_speaking --RESUME_SPEAKING(이어서 말하기)--> listening (transcript 보존)
+  sending --RESUME_SPEAKING(이어서 말하기)--> listening (transcript 보존)
+  (idle|listening|user_speaking) --TEXT_SUBMITTED(텍스트 전송/Enter)--> sending
+  (모든 상태) --ENGINE_ERROR--> error
+  error --START_LISTENING(재시도)--> listening
+  (모든 상태) --RESET--> idle
+  ```
+  `sending`은 이번 단계에서 종착점이다 — 실제 LLM 전송(Day 4)이 붙기 전까지는 여기서 더
+  진행하지 않는 게 맞는 동작이다(가짜로 다음 상태로 넘어가지 않음).
+- **무음 타이머(~1.2초) 위치와 판단 기준(둘 다 사람 확인 후 결정)**:
+  - 위치: `WebSpeechInputEngine`(어댑터) 내부가 아니라 로직 레이어
+    (`src/state-machine/silenceTimer.ts` + 이를 사용하는 `useConversationMachine.ts`)에 둠 —
+    타이머가 `onInterimResult` 콜백만 소비하는 순수 알고리즘이라 브라우저 API를 몰라도 되고,
+    PRD 3장 "mock 구현으로 교체해도 상태머신이 무변경으로 동작" 기준과 정확히 부합하며, 네이티브
+    전환 시(`RNVoiceInputEngine`)에도 그대로 재사용 가능하기 때문. 어댑터에 두면 "1.2초"라는
+    제품 정책이 특정 플랫폼 구현체에 박혀 7장 어댑터 분리 원칙과 어긋난다.
+  - 판단 기준: 브라우저 네이티브 `speechend` 이벤트가 아니라 커스텀 디바운스 타이머 사용 —
+    `speechend`는 타이밍이 명세에 없고(PRD의 "~1.2초"를 보장 못 함) Safari에서는 신뢰도 자체가
+    낮다고 지난 단계에서 확인했음. `onInterimResult`가 호출될 때마다 1200ms 타이머를 리셋하고,
+    끝까지 리셋 없이 살아남으면 `SILENCE_TIMEOUT` 이벤트를 디스패치한다. `onSpeechEnd`(네이티브
+    `speechend`)는 계속 전달만 받되 상태 전환 근거로는 쓰지 않고 참고용 로그로만 남긴다.
+  - **알려진 리스크**: "텍스트가 안 바뀜"이 "실제로 말을 멈춤"과 완전히 같지는 않아 오탐(false
+    cutoff) 가능성이 있다 — PRD 4장이 이미 이 리스크를 알고 "이어서 말하기" 버튼으로 완화하기로
+    설계해뒀다(`ResumeSpeakingButton`, 아래 참고).
+- **`ResumeSpeakingButton`(오탐 복구, Day 3)**: `user_speaking`/`sending`에서만 렌더링되도록
+  가시성 규칙을 컴포넌트 자체에 내장(`VISIBLE_STATUSES`) — 리듀서가 다른 상태에서
+  `RESUME_SPEAKING`을 무시하는 것과 별개로, 버튼이 애초에 안 보이는 것까지 이중으로 보장한다.
+  클릭 시 `listening`으로 돌아가되 `transcript`는 지우지 않는다 — `WebSpeechInputEngine`은
+  `sending` 진입 시점에도 `stop()`되지 않고 `continuous` 세션이 계속 살아있으므로(같은
+  브라우저 인식 세션이 이어짐), 다시 말을 이어가면 브라우저가 알아서 누적 결과를 계속 준다.
+  즉 "이어서 말하기"는 엔진을 재시작하지 않는 순수 상태머신 레벨의 UI 복구다.
+- **`TextInputFallback`(음성 미지원 폴백, Day 3)**: `isSpeechInputSupported()`가 `false`일 때
+  자동으로 노출되는 `<form>` 기반 텍스트 입력. `onSubmit`(전송 클릭 또는 Enter)이 곧
+  `TEXT_SUBMITTED` 이벤트를 발생시켜 무음 타이머 없이 바로 `sending`으로 전환한다 — PRD 4장이
+  명시한 "전송 버튼/Enter가 곧 턴 종료 신호이므로 무음 감지 로직이 필요 없다"는 설계를 그대로
+  구현. `WebSpeechInputEngine`을 전혀 참조하지 않는다(미지원 폴백이므로 애초에 쓸 대상이 없음).
+- **엔진 의존성 주입**: `useConversationMachine(engineFactory)`가 엔진을 팩토리로 받는다(기본값
+  `WebSpeechInputEngine`). PRD 3장의 "mock 구현으로 교체해도 상태머신이 무변경으로 동작하는지
+  확인" 요구사항을 실제로 만족시키기 위한 설계 — 다른 `SpeechInputEngine` 구현체(mock, 나중엔
+  `RNVoiceInputEngine`)를 넘기면 리듀서·타이머 코드는 그대로 재사용된다.
+- **실제 실행 검증**:
+  1. 순수 로직 결정론적 테스트(`npm run verify:silence-timer`,
+     `scripts/verify-silence-timer-logic.ts`): reducer의 모든 상태 전이(정상 전이 + "불가능한
+     전이 무시") 10개, 디바운스 타이머의 리셋/타임아웃/취소 동작 3개, 총 13개 케이스 모두 통과.
+  2. Playwright(headless Chromium)로 브라우저 이벤트 타이밍까지 확인: 브라우저의 실제
+     `SpeechRecognition` 이벤트 계약과 동일한 모양의 가짜 생성자를 주입해 "t=0ms, t=150ms에
+     interim 결과 2번(발화 중) → 그 이후 완전한 침묵"을 재현 → 실제로 t≈1619ms(마지막 interim
+     이후 1241ms)에 `sending` 상태로 전환됨을 확인(목표 1200ms 대비 오차 41ms, DOM
+     polling/이벤트 루프 오버헤드 범위 내). 콘솔 에러 0건, 네이티브 `speechend`가 한 번도
+     안 왔는데도(가짜 생성자가 이 이벤트를 안 냄) 정상적으로 sending 전환됨 — 커스텀 타이머가
+     `speechend`에 의존하지 않는다는 설계 의도를 그대로 증명.
+  3. **한계(정직하게 기록)**: Windows SAPI로 실제 음성 WAV(영어 문장 + 뒤에 진짜 무음 3초를
+     이어붙임)를 만들어 Chromium의 `--use-file-for-fake-audio-capture` 플래그로 진짜 마이크
+     입력처럼 흘려보내는 시도도 했으나, 10초 넘게 기다려도 `onresult`/`onerror` 어느 쪽도 오지
+     않고 "듣는 중" 상태에 계속 머물렀다. Playwright가 번들하는 것은 오픈소스 Chromium이라
+     Google Chrome 정식 빌드에만 있는 음성인식 서비스 인증키가 없어서일 가능성이 높다(Chrome의
+     `SpeechRecognition`은 클라우드 기반 — 5장 기술스택 문서에도 명시된 사실). 즉 **진짜 사람이
+     실제 마이크로 말하고 1.2초 멈췄을 때 자동 전송되는지는 이 자동화 환경 밖에서, 로컬 Chrome +
+     실제 마이크로 직접 확인이 필요**하다 — 확인 절차는 DEVLOG.md Day 3 항목에 안내.
+  4. `ResumeSpeakingButton`(Playwright, 가짜 `SpeechRecognition`으로 무음 오탐 재현): idle에서
+     버튼 미노출 확인 → 시작 후 `user_speaking`/`sending` 양쪽에서 노출 확인 → 클릭 시
+     `listening`으로 복귀하고 `transcript`가 보존됨을 확인 → 복귀 직후 버튼이 다시 숨겨짐을
+     확인. 페이지 에러 0건.
+  5. `TextInputFallback`(Playwright, `SpeechRecognition` 생성자를 `addInitScript`로 제거해
+     미지원 재현): 마이크 UI가 아예 안 뜨고 텍스트 입력창이 자동 노출됨을 확인 → 빈 입력일 때
+     전송 버튼 비활성화 → 입력 후 활성화 → Enter로 제출 시 `sending` 전환 및 transcript 반영,
+     입력창 비워짐까지 확인. 페이지 에러 0건.
+  6. **Day 3 DoD 4개 항목 최종 실행 검증(18개 체크 전부 PASS)**: 위 1~5의 개별 검증을 DoD
+     체크리스트 관점에서 한 번 더 통합 실행 — 특히 오탐 복구는 "버튼 클릭 1회"에서 끝내지 않고
+     복구 후 실제로 이어 말해서 두 번째 무음까지 다시 정상적으로 `sending`에 도달하는 "완주"
+     시나리오까지 검증(1회성 눈속임이 아님을 확인). **검증 범위의 정직한 한계**: 이 모든
+     자동화는 브라우저 이벤트 계약에 대한 코드 반응을 결정론적으로 증명할 뿐, "진짜 사람 음성
+     인식 품질/체감 타이밍"은 증명하지 못한다(3번 항목에서 이미 확인한 자동화 환경의 근본
+     한계). 그 부분은 사람이 직접 실기기로 확인한 "적당한 시간(1.2초) 뒤 자동 전송, 안정적"이라는
+     보고가 유일한 real-world 근거이며, 별도 재확인 질문에도 "지금까지는 안정적이었다"는 답을
+     받아 PRD 11장 스코프 축소(수동 버튼 방식)는 발동하지 않기로 함(사람 확인, 표본이 많지
+     않으니 Day 6~7 데모 준비 중 추가 확인 권장).
 
 ## 4. 어댑터 분리 설계 근거
 
-*(작성 예정 — `SpeechInputEngine`/`SpeechOutputEngine` 구현체는 Day 3에서 추가 작성)*
+### `SpeechInputEngine` → `WebSpeechInputEngine` (Day 3)
+
+- **인터페이스 변경**: Day 1 시그니처(`start(onInterimResult, onSpeechEnd)`)에는 에러를 상위에
+  알릴 방법이 없었다. 실제 구현 중 발견해 사람 확인 후 `onError` 콜백을 추가했다
+  (`docs/log/DECISIONS.md` 2026-08-24 참고). `SpeechInputError`는 브라우저의
+  `SpeechRecognitionErrorCode`를 그대로 노출하지 않고 `SpeechInputErrorReason`(예:
+  `permission-denied`, `no-speech`, `audio-capture`, `network`)으로 번역해서 올린다 — 상위
+  상태머신이 브라우저 전용 타입을 몰라도 되게 하기 위함(7장 어댑터 분리 원칙).
+- **feature detection**: `window.SpeechRecognition ?? window.webkitSpeechRecognition` 생성자
+  존재 여부만 체크(`isSpeechInputSupported()`). Safari는 생성자가 존재해 "지원함"으로 판정되며,
+  이는 UA 스니핑을 피하기 위한 의도된 선택 — 실제로는 Safari의 `continuous` 모드에 런타임 버그가
+  있다는 걸 알지만(MDN/WebKit 이슈 트래커로 확인), API 부재와 런타임 버그는 다른 문제라고 보고
+  표준 feature-detection만 쓰기로 사람 확인 후 결정(`docs/log/DECISIONS.md` 참고).
+- **구두점 자동 추론(`unspokenPunctuation`, 실험적 기능, 사람 확인 후 결정)**: 사용자가 실기기
+  테스트 중 "말끝을 올려 질문해도 '?'가 안 붙는다"고 지적 → 확인해보니 Web Speech API 자체가
+  기본적으로 구두점 없는 텍스트만 주고, Chrome 151+에 추가된 `unspokenPunctuation`(MDN
+  "Experimental", 기본값 `false`)을 켜야 마침표/쉼표/물음표를 추론해서 넣어준다는 걸 확인.
+  `recognition.unspokenPunctuation = true`로 활성화. 미지원 브라우저에서는 존재하지 않는
+  프로퍼티 대입이라 에러 없이 무시됨. **알려진 불확실성**: 공식 explainer는 "자연스러운 멈춤 +
+  문법 구조" 기반이라고만 설명 — 억양(피치)만으로 의문문을 판별하는지는 근거를 못 찾아 100%
+  기대한 대로 물음표가 붙는다고 보장하지 않는다.
+  **실기기 확인 결과**: 켜도 실제 크롬에서는 "?"가 붙지 않음을 확인 — 이 Experimental
+  기능이 기대만큼 동작하지 않는 사례. 중요도가 낮다고 판단(사람 확인)해 더 파고들지 않고
+  코드는 그대로 둠(무해한 설정이라 되돌릴 이유 없음).
+- **`onInterimResult` 콜백 값**: 브라우저의 `SpeechRecognitionEvent.results`는
+  `resultIndex`부터의 "변경분"만 담고 있지만, 매번 세션 시작 이후 누적된 전체 텍스트를 조립해서
+  통째로 넘긴다 — 호출자가 브라우저 이벤트의 인덱싱 구조를 몰라도 화면에 그대로 표시할 수 있게
+  하기 위한 선택(구현 세부사항, 인터페이스 시그니처와 무관해 임의로 결정).
+- **`onSpeechEnd` ↔ 브라우저 `speechend` 이벤트 매핑**: PRD 6장의 "무음 타이머(~1.2초) 기반
+  발화 종료 감지"는 이번 단계 범위 밖(다음 단계에서 별도로 구현 예정)이라, 지금은 브라우저의
+  네이티브 `speechend` 이벤트를 그대로 전달만 한다. **알려진 불확실성**: `continuous: true`
+  모드에서 `speechend`가 발화당 몇 번, 정확히 몇 초의 무음 후에 발생하는지는 MDN에 명시돼 있지
+  않고 브라우저마다 다를 수 있어, 다음 단계(커스텀 무음 타이머 구현)에서 실제 브라우저로 타이밍을
+  다시 실측해야 한다.
+- **continuous 세션 자동 재시작**: `continuous: true`여도 브라우저가 예고 없이 세션을 끊을 수
+  있다(장시간 무음 등, 브라우저별 동작). `stop()`을 호출한 적이 없고 직전 에러가 치명적이지
+  않았다면(`no-speech`만 재시작 허용, `permission-denied`/`audio-capture`/`network`/`aborted`는
+  재시작 안 함) 같은 인스턴스에서 `recognition.start()`를 다시 불러 "계속 듣기" 의도를 지킨다 —
+  `continuous: true`를 요청한 이상 필요한 동작이라고 판단해 별도 확인 없이 구현, 근거는 여기 기록.
+- **마이크 권한 플로우**: `SpeechInputEngine`엔 별도 권한 요청 메서드가 없다(Day 1부터 없었고
+  이번에도 추가하지 않음) — Web Speech API 자체가 `recognition.start()` 호출 시 브라우저가
+  필요하면 알아서 권한 프롬프트를 띄우는 구조라, `NotificationSetup`의 `Notification.requestPermission()`과
+  달리 별도 "요청" API가 없다. 권한 상태(허용/거부)는 `start()` 이후 `onerror`의
+  `not-allowed`/`service-not-allowed` → `permission-denied`로만 알 수 있다.
+- **실제 실행 검증**: Playwright(headless Chromium)로 (1) `webkitSpeechRecognition` 생성자
+  존재 확인, (2) 생성자를 제거한 뒤 재로드 시 미지원 안내 문구 노출 + 시작 버튼 미노출, (3)
+  `context.grantPermissions(['microphone'])` + fake device로 정상 listening 진입(실제 발화
+  인식은 headless 환경 특성상 검증 불가, 에러 없이 listening 상태 진입까지만 확인), (4) 브라우저의
+  실제 마이크 권한 다이얼로그는 headless 환경에서 응답 없이 무한 대기하는 제약이 있어(Day 2의
+  `Notification.permission` headless 제약과 같은 종류) `SpeechRecognitionErrorEvent`와 동일한
+  모양의 가짜 생성자를 주입해 `not-allowed`/`service-not-allowed`(차단 안내 노출) /
+  `audio-capture`/`network`(에러 배너 노출, 재시작 안 함) / `no-speech`(재시작 허용) 5가지
+  에러 경로를 모두 확인, (5) 시작/중지 버튼 상태 토글 및 정상 종료 확인. 콘솔 unhandled error 없음.
+  `npx tsc -b`, `npm run lint` 모두 통과.
+- **임시 디버그 UI**: `src/components/SpeechInputDemo/SpeechInputDemo.tsx`를 `App.tsx`에 임시로
+  붙여 눈으로 확인 가능하게 함(Day 2의 `NotificationSetup` 임시 배치와 같은 패턴).
+  `ConversationScreen`이 생기면 이 데모는 제거하고 실제 화면으로 통합 필요.
+
+*(`SpeechOutputEngine` 구현체는 아직 미작성 — Day 5 예정)*
 
 ### `ReminderEngine` → `BrowserNotificationEngine` (Day 2)
 

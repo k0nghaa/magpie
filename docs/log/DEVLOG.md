@@ -167,10 +167,242 @@
 
 ## Day 3 — 음성 입력 & 자동 턴 감지
 
-- 요청 내용:
+### 1차 — `WebSpeechInputEngine` 구현체 + feature detection + 마이크 권한 플로우 (2026-08-24)
+
+- 요청 내용: Day 3 전체 범위 중 3가지만 우선 진행 — (1) `SpeechInputEngine`(Day 1 정의)의
+  실제 구현체 `WebSpeechInputEngine`(Web Speech API, `continuous: true`), (2) 연속 음성인식
+  feature detection → 미지원 시 텍스트 모드 폴백 "판단 로직"만(텍스트 입력 UI 자체는 제외),
+  (3) 마이크 권한 요청/허용/거부 플로우. 무음 타이머(~1.2초) 기반 자동 전송, 오탐 복구 버튼은
+  이번 요청 범위 밖(다음 단계).
 - 완료 사항:
-- DoD 체크: [ ] 실시간 인식 텍스트 반영 [ ] 무음 시 자동 전송 [ ] 오탐 복구 버튼 동작 [ ] 미지원 환경 텍스트 폴백
+  - 코드 작성 전 Web Speech API의 브라우저 지원 현황을 MDN(`SpeechRecognition`, `continuous`,
+    `speechend`/`end` 이벤트, `SpeechRecognitionErrorEvent/error`), caniuse, GitHub 이슈
+    (`mdn/browser-compat-data#22126`)로 직접 확인 — 오래된/추측성 정보에 기대지 않음. 확인
+    결과는 `docs/rules/ARCHITECTURE.md`의 `WebSpeechInputEngine` 메모에 정리.
+  - **인터페이스 확장(Day 1 시그니처 변경, 사람 확인 후 결정)**: `SpeechInputEngine.start()`에
+    `onError` 콜백 추가. 마이크 권한 거부·인식 에러를 상태머신에 알릴 방법이 원래 시그니처엔
+    없었음. `SpeechInputError`/`SpeechInputErrorReason` 타입 신설(`src/adapters/types.ts`) —
+    브라우저의 `SpeechRecognitionErrorCode`를 그대로 노출하지 않고 어댑터가 번역.
+  - **feature detection 기준(사람 확인 후 결정)**: `window.SpeechRecognition ??
+    window.webkitSpeechRecognition` 생성자 존재 여부만 체크(표준 방식, UA 스니핑 안 함).
+    Safari도 생성자가 있어 "지원함"으로 판정되며, `continuous` 모드의 실제 런타임 버그는 이번
+    단계 범위 밖으로 남김(근거: `docs/log/DECISIONS.md`).
+  - `src/adapters/speech-input/webSpeechRecognition.d.ts`: TypeScript `lib.dom.d.ts`에
+    `SpeechRecognition` 생성자 자체와 `Window.webkitSpeechRecognition`이 없어(관련 이벤트/에러
+    타입만 있음) 최소한의 ambient 타입 선언 추가.
+  - `src/adapters/speech-input/WebSpeechInputEngine.ts`: `continuous: true` + `interimResults:
+    true`로 연동, `onresult`는 세션 누적 전체 텍스트를 `onInterimResult`로 전달, `onspeechend`를
+    `onSpeechEnd`로 그대로 전달, `onerror`는 브라우저 에러 코드를 `SpeechInputErrorReason`으로
+    번역해 `onError`로 전달. `continuous: true` 세션이 예고 없이 끊겨도(`onend`) `stop()`을
+    부른 적 없고 직전 에러가 치명적이지 않으면(`no-speech`만 재시작 허용) 같은 인스턴스로
+    재시작 — "계속 듣기" 의도를 지키기 위한 구현 세부사항(자세한 근거는 COMPONENT.md).
+  - `src/components/SpeechInputDemo/SpeechInputDemo.tsx`: 실제 브라우저 확인용 임시 디버그
+    컴포넌트(`App.tsx`에 임시 배치, Day 2의 `NotificationSetup` 패턴과 동일). 시작/중지 버튼,
+    실시간 인식 텍스트, 미지원/권한거부/기타 에러 안내를 `aria-live`로 노출.
+  - **실제 실행 검증(Playwright, headless Chromium)**: (1) `webkitSpeechRecognition` 생성자
+    존재 및 데모 렌더링 확인, (2) 생성자를 초기화 스크립트로 제거한 뒤 재로드 → 미지원 안내
+    문구 노출 + 시작 버튼 미노출 확인, (3) `context.grantPermissions(['microphone'])` +
+    `--use-fake-device-for-media-stream`으로 정상 listening 진입(에러 없음) 확인, (4) 브라우저의
+    실제 마이크 권한 다이얼로그가 headless 환경에서 응답 없이 무한 대기하는 제약을 발견(Day 2의
+    `Notification.permission` headless 제약과 같은 종류) → `SpeechRecognitionErrorEvent`와
+    동일한 모양의 가짜 생성자를 주입해 `not-allowed`/`service-not-allowed`(차단 안내 노출),
+    `audio-capture`/`network`(에러 배너 노출 후 재시작 안 함), `no-speech`(재시작 허용) 경로를
+    모두 확인, (5) 시작/중지 버튼 상태 토글과 정상 종료(잔여 "듣는 중" 텍스트 없음) 확인. 콘솔
+    unhandled pageerror 0건. `npx tsc -b`, `npm run lint` 모두 통과.
+- DoD 체크: [x] 미지원 환경 텍스트 폴백 판단 로직 (텍스트 입력 UI는 다음 단계) [x] 마이크
+  권한 허용/거부 플로우 동작 확인 — [ ] 실시간 인식 텍스트 반영(엔진 자체는 구현·검증했으나
+  headless 환경 특성상 실제 음성으로 인식 텍스트가 채워지는 것까지는 확인 못 함, 로컬 실기기
+  마이크로 재확인 권장) [ ] 무음 시 자동 전송, [ ] 오탐 복구 버튼 — 다음 단계 범위.
 - 이슈/메모:
+  - Safari(생성자는 있으나 `continuous` 런타임 버그)와 Edge(지원 여부 자체가 논쟁 중,
+    `mdn/browser-compat-data#22126` 미해결)는 feature detection으로 걸러지지 않는다 — 다음
+    단계(무음 타이머·재시도 로직)에서 실기기로 재검증 필요.
+  - `onSpeechEnd`는 지금 브라우저 네이티브 `speechend` 이벤트를 그대로 전달만 함.
+    `continuous: true`에서 발화당 정확히 몇 초 무음 후 발생하는지는 MDN에 명시돼 있지 않아,
+    다음 단계의 커스텀 무음 타이머(~1.2초) 구현 시 실제 타이밍을 다시 실측해야 함.
+  - `SpeechInputDemo`는 임시 디버그 컴포넌트 — `ConversationScreen`이 생기면 제거하고 실제
+    화면으로 통합 필요.
+
+### 2차 — 무음 타이머(~1.2초) 기반 발화 종료 감지 → `sending` 전환 (2026-08-24)
+
+- 요청 내용: PRD 6장 상태머신(`listening → user_speaking → sending`)에 무음 타이머(~1.2초)를
+  연결. 코드 작성 전 (1) 이 로직을 로직 레이어/어댑터 중 어디에 둘지, (2) 무음 판단을 커스텀
+  타이머로 할지 브라우저 네이티브 이벤트로 할지 트레이드오프를 먼저 설명하고 확인받기.
+- 완료 사항:
+  - **사람 확인 후 결정한 것 3가지** (근거는 `docs/log/DECISIONS.md` 참고):
+    1. 위치: 로직 레이어(`useConversationMachine` hook) — `WebSpeechInputEngine` 내부 아님.
+    2. 무음 판단: `onInterimResult` 기반 커스텀 디바운스(1200ms) — 브라우저 네이티브
+       `speechend` 이벤트 아님.
+    3. 상태머신 범위: 오늘 실제로 쓰이는 5개 상태만(`idle`/`listening`/`user_speaking`/
+       `sending`/`error`) — `assistant_speaking`/`streaming`은 어댑터가 생기는 Day 4~5에 추가.
+  - `src/state-machine/types.ts`: `ConversationStatus`/`ConversationMachineState`/
+    `ConversationEvent` 타입 신설.
+  - `src/state-machine/conversationReducer.ts`: 순수 리듀서. 각 이벤트가 의미를 갖는 상태에서만
+    반영되고 그 외엔 무시하는 방식으로 불가능한 상태 조합을 원천 차단(예: `sending`에서
+    `SILENCE_TIMEOUT` 재수신 무시).
+  - `src/state-machine/silenceTimer.ts`: 브라우저 API를 전혀 참조하지 않는 순수 디바운스
+    타이머(`SILENCE_TIMEOUT_MS = 1200`). `reset()`이 호출될 때마다 타이머를 되감고, 끝까지
+    살아남으면 `onTimeout` 호출.
+  - `src/state-machine/useConversationMachine.ts`: `SpeechInputEngine`(팩토리로 주입, 기본값
+    `WebSpeechInputEngine`) + 리듀서 + 무음 타이머를 배선하는 hook. `onInterimResult`마다
+    타이머 리셋, 타이머가 울면 `SILENCE_TIMEOUT` 디스패치, 엔진 에러 시 타이머 취소 후
+    `ENGINE_ERROR` 디스패치. 네이티브 `onSpeechEnd`(=`speechend`)는 참고용 로그만 남기고 상태
+    전환에는 미사용(사람 확인 후 결정).
+  - `src/components/SpeechInputDemo/SpeechInputDemo.tsx`를 새 hook을 쓰도록 교체 — 현재
+    상태(`idle`/듣는 중/발화 인식 중/전송 대기/오류)를 `aria-live`로 실시간 노출해 사람이
+    직접 확인할 수 있게 함.
+  - `scripts/verify-silence-timer-logic.ts`(`npm run verify:silence-timer`로 커밋된 검증
+    스크립트, Day 1의 `verify:stream` 패턴과 동일): 리듀서의 정상 전이 6개 + 불가능한 전이
+    무시 2개 + 에러/재시도/리셋 2개, 디바운스 타이머의 리셋/타임아웃/취소 3개 — 총 13개 케이스
+    실제 실행 결과 모두 PASS.
+  - Playwright(headless Chromium)로 브라우저 이벤트 타이밍 검증: `SpeechRecognition`과 동일한
+    모양의 가짜 생성자로 "t=0ms·150ms에 interim 결과 2번 → 이후 완전한 침묵"을 재현 →
+    마지막 interim 이후 1241ms 뒤(목표 1200ms, 오차 41ms — DOM polling 오버헤드 범위 내)에
+    `sending` 상태로 전환됨을 실측. 네이티브 `speechend`가 한 번도 안 왔는데도 정상 전환돼
+    "커스텀 타이머가 `speechend`에 의존하지 않는다"는 설계를 그대로 증명. 콘솔 에러 0건.
+  - **실기기 마이크 테스트 시도와 한계(정직하게 기록)**: Windows SAPI로 실제 영어 음성 WAV를
+    합성하고 뒤에 진짜 무음 3초를 이어붙여 Chromium의 `--use-file-for-fake-audio-capture`로
+    진짜 마이크처럼 흘려보내는 자동화 테스트도 시도했다. 10초 넘게 기다려도 `onresult`도
+    `onerror`도 오지 않고 "듣는 중"에 멈춰 있었다 — Playwright가 번들하는 오픈소스 Chromium에는
+    Google Chrome 정식 빌드 전용 음성인식 인증키가 없어서일 가능성이 높다(Chrome의
+    `SpeechRecognition`은 클라우드 기반, PRD 5장에도 명시된 사실). 즉 **이 부분은 자동화로
+    끝까지 검증할 수 없었고, 사람이 로컬 Chrome + 실제 마이크로 직접 확인해야 한다.**
+  - `npx tsc -b`, `npm run lint` 모두 통과.
+- DoD 체크: [x] 무음 시 자동 전송(로직 검증 완료, 실기기 마이크 확인은 아래 절차로 직접 확인
+  필요) [ ] 오탐 복구 버튼 — 여전히 다음 단계 범위(이번 요청에 포함 안 됨).
+- **실기기 확인 절차(직접 해봐야 하는 부분)**:
+  1. `npm run dev`로 로컬 서버 실행 후 브라우저(Chrome 권장)로 열기.
+  2. "마이크 입력 테스트" 섹션에서 "마이크 테스트 시작" 클릭 → 마이크 권한 허용.
+  3. 아무 말이나 하고, 화면에 "발화 인식 중" 상태와 실시간 인식 텍스트가 뜨는지 확인.
+  4. 말을 멈추고 1.2초 정도 기다렸을 때 상태가 "전송 대기 상태 (LLM 연동은 Day 4 예정)"로
+     자동으로 바뀌는지 확인(아직 실제로 어디 전송되진 않음 — Day 4에서 연결 예정).
+  5. 너무 빨리(1.2초 전에) 전환되거나 반대로 한참 안 바뀌면 오탐/지연 문제이니 알려주면
+     타이밍 값이나 판단 기준을 다시 조정.
+- 이슈/메모:
+  - "이어서 말하기"(오탐 복구) 버튼은 여전히 미구현 — 커스텀 디바운스 방식의 알려진 리스크
+    (뜸 들이다 오탐)를 완화하는 안전장치라 다음으로 미루면 안 될 수도 있음, 필요 시 알려주면
+    바로 진행.
+  - `sending`은 지금 종착점(더 이상 진행 안 함) — Day 4에서 LLM 스트리밍이 붙으면
+    `sending → streaming → assistant_speaking → listening`을 `conversationReducer`에 추가.
+
+### 3차 — 구두점(물음표 등) 자동 추론 활성화 (2026-08-24)
+
+- 요청 내용: 실기기 테스트 중 사용자가 "말끝을 올려 질문으로 말해도 '?'를 못 알아듣냐"고
+  질문 → 추측하지 않고 확인 후 답변, 활성화 여부 확인받고 진행.
+- 완료 사항:
+  - 확인 결과: Web Speech API `SpeechRecognition`에 `unspokenPunctuation` 속성이 있음
+    (Chrome 151+, MDN "Experimental" 표시, 호환성 표 비어 있음). 기본값 `false` — 켜지 않으면
+    구두점이 전혀 안 붙는다는 게 원인이었음. GitHub explainer는 "자연스러운 멈춤 + 문법 구조"
+    기반이라고만 설명하고, 억양(피치) 직접 분석 여부는 근거를 못 찾아 사람에게 그대로 전달.
+  - 사람 확인 후 `recognition.unspokenPunctuation = true`로 활성화(`WebSpeechInputEngine.ts`).
+    `webSpeechRecognition.d.ts`에 타입 선언 추가. 미지원 브라우저에서는 존재하지 않는
+    프로퍼티 대입이라 에러 없이 무시됨.
+  - `npx tsc -b`, `npm run lint` 모두 통과.
+- DoD 체크: 해당 없음(Day 3 DoD 자체에는 없는 항목, 사용자 질문에서 파생된 개선).
+- 이슈/메모: Experimental 기능이라 "?"가 기대만큼 항상 붙는다고 보장 못 함 — 실기기에서 계속
+  안 붙으면 알려달라고 안내함.
+- **실기기 재확인(2026-08-24, 사람이 직접 크롬에서 테스트)**: 켜도 실제로 "?"가 안 붙는 것을
+  확인. 중요도가 낮다고 판단(사람 확인)해 더 파고들지 않고 여기서 종료 — 코드는 무해하므로
+  그대로 둠.
+
+### 4차 — `ResumeSpeakingButton`(오탐 복구) + `TextInputFallback`(텍스트 폴백) (2026-08-24)
+
+- 요청 내용: (1) 무음 오탐 시 "이어서 말하기"로 `listening` 강제 복귀시키는
+  `ResumeSpeakingButton`(PRD 4장·6장), `user_speaking`/`sending`에서만 노출되는지 상태머신과
+  정확히 연결해서 확인. (2) feature detection 미지원 시 자동 노출되는 `TextInputFallback`
+  (PRD 4장, 전송/Enter가 턴 종료 신호라 무음 감지 불필요). 미지원 상황 재현 방법이 불확실하면
+  지어내지 말고 모른다고 말할 것.
+- 완료 사항:
+  - `src/state-machine/types.ts`/`conversationReducer.ts`에 이벤트 2개 추가:
+    - `RESUME_SPEAKING`: `user_speaking`/`sending`에서만 `listening`으로 전이, 그 외 무시.
+      `transcript`는 보존(엔진이 `sending` 진입 시에도 `stop()`되지 않아 continuous 세션이
+      계속 살아있으므로, 다시 말하면 브라우저가 알아서 누적 인식을 이어감 — 지우면 오히려
+      손해).
+    - `TEXT_SUBMITTED`: `idle`/`listening`/`user_speaking`에서 무음 타이머 없이 바로
+      `sending`으로 전이(PRD 4장 "전송이 곧 턴 종료 신호"). 공백만 있는 제출은 무시.
+  - `src/state-machine/useConversationMachine.ts`: `resumeSpeaking()`/`submitText(text)` 함수
+    노출. `resumeSpeaking`은 엔진을 건드리지 않음(위 이유), `submitText`는
+    `WebSpeechInputEngine`을 아예 참조하지 않음(텍스트 폴백은 애초에 엔진을 쓸 이유가 없음).
+  - `src/components/ConversationScreen/ResumeSpeakingButton.tsx`: 가시성 규칙
+    (`user_speaking`/`sending`에서만 렌더링)을 컴포넌트 자체에 내장 — 리듀서의 상태 가드와
+    별개로 버튼이 애초에 안 보이는 것까지 이중 보장.
+  - `src/components/ConversationScreen/TextInputFallback.tsx`: `<form onSubmit>` 하나로
+    "전송 클릭"과 "Enter"를 동시에 처리(HTML 폼의 기본 동작을 그대로 이용 — 별도 keydown
+    핸들러 불필요). 빈/공백 입력은 제출 버튼 비활성화 + 제출 시에도 무시(이중 방어).
+  - `SpeechInputDemo.tsx`에 두 컴포넌트 배선: 미지원이면 `TextInputFallback`, 지원하면 마이크
+    UI 옆에 `ResumeSpeakingButton` 추가.
+  - `scripts/verify-silence-timer-logic.ts`에 새 이벤트 케이스 8개 추가(총 21개 검증) — 전부
+    PASS(`npm run verify:silence-timer`).
+  - **Playwright 실제 실행 검증**:
+    1. `ResumeSpeakingButton`: 가짜 `SpeechRecognition`으로 "발화 1번 → 침묵"을 재현해 무음
+       오탐을 만든 뒤 — idle에서 버튼 미노출 → `user_speaking`/`sending` 양쪽에서 노출 →
+       클릭 시 `listening` 복귀 + transcript 보존 확인 → 복귀 직후 버튼 다시 숨겨짐 확인.
+    2. `TextInputFallback`: `addInitScript`로 `SpeechRecognition`/`webkitSpeechRecognition`
+       생성자를 제거해 미지원 상황을 재현(Day 3 1차에서 이미 검증에 썼던 것과 동일한 기법) →
+       마이크 UI 자체가 안 뜨고 텍스트 입력창이 자동 노출 → 빈 입력 시 전송 버튼 비활성화 →
+       입력 후 활성화 → Enter 제출로 `sending` 전환 + transcript 반영 + 입력창 초기화까지 확인.
+    둘 다 페이지 에러 0건.
+  - `npx tsc -b`, `npm run lint` 모두 통과(기존과 동일한 무해한 경고 1건만 유지).
+- DoD 체크: [x] 오탐 복구 버튼 동작(`user_speaking`/`sending`에서만 노출 확인) [x] 미지원 환경
+  텍스트 폴백 UI 완성(Day 3 1차에선 판단 로직만이었는데 이번에 실제 UI까지 완성) → **Day 3
+  DoD 전체 항목 충족**.
+- **브라우저 devtools로 미지원 상황을 직접 재현하는 방법(정확히 확인된 것만 안내)**:
+  1. 크롬에서 개발자 도구(F12) → Console 탭 이동.
+  2. `delete window.SpeechRecognition; delete window.webkitSpeechRecognition;` 입력 후 Enter.
+  3. 페이지를 새로고침하면 `isSpeechInputSupported()`가 `false`를 반환해 텍스트 입력 모드로
+     자동 전환됨을 확인할 수 있음(이 프로젝트가 실제로 Playwright 자동화 검증에도 쓴 것과 동일한
+     방법 — 지어낸 방법이 아님). `delete`가 안 먹으면(어떤 브라우저는 내장 전역을 `delete` 못
+     하게 막기도 함) `Object.defineProperty(window, 'webkitSpeechRecognition', { value: undefined })`
+     로 대체 가능(다만 이건 이번에 직접 테스트하지 않아 100% 보장은 못 함 — 첫 번째 `delete`
+     방법이 안 될 때만 시도해보길 권장).
+- 이슈/메모:
+  - `ResumeSpeakingButton`이 상태를 `listening`으로 되돌린 뒤, 사용자가 다시 아무 말도 안 하고
+    한참 있으면 그냥 `listening`에 계속 머문다(추가 타임아웃 없음) — PRD에도 이 경우의 처리가
+    명시돼 있지 않아 임의로 만들지 않음.
+  - `TextInputFallback`은 제출 후 `sending`에서 더 진행 안 함(Day 4 LLM 연동 전까지 공통된
+    "다음 상태 없음" 제약, 음성 모드와 동일).
+
+### 5차 — Day 3 DoD 4개 항목 실행 검증 및 최종 마감 (2026-08-24)
+
+- 요청 내용: Day 3 DoD 4개 항목을 "될 것 같다"로 넘기지 말고 하나씩 실제로 실행해서 결과로
+  보여줄 것. 무음 감지가 실제로 불안정하면(자주 오탐/미전송) 억지로 맞추지 말고 있는 그대로
+  보고하고, 필요하면 PRD 11장 "잘라낼 순서 1번"(자동 턴테이킹 → 수동 버튼 방식) 스코프 축소를
+  상의.
+- 검증 방법과 그 한계(정직하게 구분):
+  - **자동화로 검증한 것**: 브라우저 `SpeechRecognition`의 실제 이벤트 계약과 동일한 모양의
+    가짜 생성자를 Playwright로 주입해, 우리 코드(엔진→상태머신→화면)가 그 이벤트에 정확히
+    반응하는지를 결정론적으로 확인. 이는 "코드가 맞게 짜였는지"를 증명하는 것이지 "진짜 사람
+    음성 인식 품질/타이밍 체감"을 증명하는 게 아니다 — 그 부분은 자동화로 검증 불가능함을
+    이전 단계에서도 이미 확인한 바 있음(Chromium 오픈소스 빌드의 음성인식 인증키 부재).
+  - **실제 사람 체감(유일한 real-world 데이터)**: 사람이 직접 로컬 Chrome + 실제 마이크로
+    테스트한 결과 "말 멈추고 적당한 시간(1.2초) 뒤 자동으로 전송 대기 상태 전환됨, 좋음"으로
+    확인(앞선 턴에서 보고받음). 이번 요청에 대한 재확인 질문에도 "지금까지는 안정적이었다"는
+    답변을 받음 — 오탐/미전송 사례 보고 없음.
+- 완료 사항(Playwright 자동화 실행 결과, 총 18개 체크 전부 PASS):
+  1. **실시간 텍스트 반영**: 인터림 결과를 4단계로 나눠 주입(`안`→`안녕`→`안녕하`→`안녕하세요`)
+     → 화면에 3단계 이상 순차 갱신되고 최종적으로 `안녕하세요`가 반영됨을 확인.
+  2. **무음 시 자동 전송**: 마지막 인터림 이후 1232.5ms 뒤 `sending` 전환(목표 1200ms, 오차
+     32.5ms — Playwright의 DOM polling/이벤트 루프 오버헤드 범위 내).
+  3. **오탐 복구(핵심 검증 — 1회성이 아니라 완주까지 확인)**: (a) 발화 중 버튼 노출 → (b) 무음
+     오탐으로 `sending` 진입 재현 → (c) `sending`에서도 버튼 계속 노출 → (d) 클릭 시 `listening`
+     복귀 + transcript 보존(`"음... 그러니까"`가 안 지워짐) + 엔진 인스턴스가 재생성되지
+     않음(같은 continuous 세션 유지, 인스턴스 카운트 1 유지) → (e) **보강 검증**: 복구 후 실제로
+     이어 말하면 다시 `user_speaking`으로 전환되고, 두 번째 무음 뒤 다시 `sending`으로 정확히
+     진입하며 이어붙인 전체 문장(`"음... 그러니까 오늘 저녁에 뭐 먹을까?"`)이 그대로 반영됨 —
+     버튼이 한 번 눌러보고 끝나는 눈속임이 아니라 실제 대화 흐름을 완주할 수 있음을 확인.
+  4. **미지원 환경 텍스트 폴백**: `SpeechRecognition`/`webkitSpeechRecognition` 생성자를 제거해
+     재현 → 마이크 UI 미노출 + 텍스트 입력창 자동 노출 → Enter 제출로 무음 감지 없이 즉시
+     `sending` 전환 확인.
+  - 페이지 에러(unhandled) 0건, 전 항목에서 공통 확인.
+- **스코프 조정 여부**: 없음. 자동 턴테이킹(무음 타이머 기반) 방식을 그대로 유지 — 사람이
+  직접 사용해본 결과와 이번 재확인 질문 모두 불안정 사례가 없어 PRD 11장 "잘라낼 순서 1번"
+  (수동 버튼 방식으로 축소)을 발동할 근거가 없다고 판단(사람 확인). 별도 `DECISIONS.md` 기록은
+  생략 — "축소하지 않고 유지"는 설계 변경이 아니라 기존 설계의 확인이므로.
+- DoD 체크: **[x] 실시간 인식 텍스트 반영 [x] 무음 시 자동 전송 [x] 오탐 복구 버튼 동작(완주까지
+  확인) [x] 미지원 환경 텍스트 폴백 → Day 3 DoD 4개 항목 전체 통과.**
+- 이슈/메모: 이번 검증은 표본이 많지 않다(사람의 실사용 1~2회 + 결정론적 자동화 테스트) —
+  Day 6~7 데모 녹화·발표 준비 과정에서 더 다양한 발화 패턴(긴 문장, 여러 번 뜸 들이기 등)으로
+  한 번 더 확인해보는 걸 권장.
 
 ## Day 4 — LLM 스트리밍
 

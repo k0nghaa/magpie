@@ -89,3 +89,120 @@
 - 결정: (B).
 - 이유: 사람 확인받음(재시도 로직은 이 PoC 스코프에서 과하다는 점엔 이견 없었음). (A)는 PRD 목표("모든 예외 상태가 UI로 명시적으로 처리된다")에 못 미침. (C)는 원인과 무관하게 항상 별도 UI를 노출해 과설계. (B)는 가장 현실적인 실패 원인(권한 변경)에 대해서는 이미 만들어둔 예외 시나리오 UI를 재사용해 새 코드 없이 해결하고, 그 외 드문 원인은 콘솔 로그로 충분하다고 판단.
 - 영향받는 범위: `src/components/NotificationSetup/NotificationSetup.tsx`(`getCurrentPermission`, `onFire` 콜백의 `.catch()`).
+
+### 2026-08-24 `SpeechInputEngine.start()`에 `onError` 콜백 추가 (Day 1 시그니처 변경)
+
+- 배경/문제: Day 1에 확정된 시그니처(`start(onInterimResult, onSpeechEnd): void`)에는 에러를
+  상위에 알릴 방법이 없다. 그런데 Day 3에서 실제로 구현해보니 마이크 권한 거부(`not-allowed`),
+  인식 서비스 차단(`service-not-allowed`), 오디오 캡처 실패, 네트워크 오류 등은 상태머신이
+  "정상적으로 말이 끝남"(`onSpeechEnd`)과 구분해서 알아야 하는 정보다(PRD 6장의 "어느 상태든
+  실패 → error → (재시도) → listening" 전환과 직결). 시그니처를 임의로 바꾸지 않고 먼저 확인.
+- 검토한 대안: (A) `onError` 콜백 추가로 시그니처 확장. (B) 시그니처 유지, 에러 시에도
+  `onSpeechEnd`만 호출(상태머신이 에러와 정상 종료를 구분 못 함). (C) 이번 단계는 구현체만
+  만들고 에러 전파 설계는 다음 단계로 미룸.
+- 결정: (A).
+- 이유: 사람 확인받음. PRD가 이미 "에러 → error 상태"라는 명확한 요구사항을 갖고 있어서(B)는
+  요구사항 미달. 에러 정보를 담는 타입(`SpeechInputError` / `SpeechInputErrorReason`)은 브라우저의
+  `SpeechRecognitionErrorCode`를 그대로 노출하지 않고 어댑터가 번역한 값만 노출 — 7장 어댑터
+  분리 원칙(로직 레이어가 어댑터 구현체를 몰라야 함)을 그대로 유지.
+- 영향받는 범위: `src/adapters/types.ts`(`SpeechInputEngine`/`SpeechInputError`/`SpeechInputErrorReason`
+  신설), `docs/rules/PRD.md` 7장, `docs/rules/ARCHITECTURE.md` 인터페이스 계약, 향후 상태머신
+  구현 시 `onError` 처리 필요.
+
+### 2026-08-24 `WebSpeechInputEngine` feature detection 기준: 생성자 존재 여부만 체크 (UA 스니핑 안 함)
+
+- 배경/문제: PRD 4장은 "연속 음성인식 미지원 브라우저(Safari 등)"를 텍스트 폴백 대상으로 명시한다.
+  그런데 실제로 확인해보니(MDN, WebKit/web-speech-api 이슈, Apple 커뮤니티 포럼) Safari는
+  `webkitSpeechRecognition` 생성자 자체는 존재하고, `continuous: true`에서 마이크가 멈추지
+  않거나 결과가 아예 안 오는 **런타임 버그**만 있다 — API 부재가 아니다. PRD 문구를 문자 그대로
+  따르려면 UA 스니핑으로 Safari를 미리 배제해야 하는데, 이는 표준 feature-detection과 다른
+  접근이라 임의로 정하지 않고 확인.
+- 검토한 대안: (A) 표준 방식 — 생성자 존재 여부만 체크, Safari도 "지원함"으로 판정하고 실제
+  시도. (B) PRD 문구대로 — 생성자 체크에 더해 Safari를 UA로 감지해 강제로 "미지원" 처리.
+- 결정: (A).
+- 이유: 사람 확인받음. UA 스니핑은 브리틀하고(Safari 버전마다 실제 버그 유무가 다를 수 있고,
+  Apple이 버그를 고치면 근거 없이 계속 차단하게 됨) 안티패턴으로 알려져 있음. 또한 Edge(Chromium)도
+  이론상 지원해야 하지만 실제 동작에 대한 논쟁(`mdn/browser-compat-data#22126`, 미해결)이 있어,
+  "이름으로 브라우저를 판별"하는 접근 자체가 이번 생태계에서 신뢰하기 어렵다고 판단.
+- 영향받는 범위: `src/adapters/speech-input/WebSpeechInputEngine.ts`(`isSpeechInputSupported`).
+  **알려진 한계**: Safari/Edge에서 생성자는 있지만 런타임에 조용히 실패하는 경우, 이번 단계
+  범위(feature detection)로는 못 잡는다 — 무음 타이머·재시도 로직을 만드는 다음 단계에서 실제
+  브라우저로 재검증 필요 (`docs/rules/ARCHITECTURE.md`의 `WebSpeechInputEngine` 메모 참고).
+
+### 2026-08-24 무음 타이머(~1.2초) 로직의 위치: 로직 레이어(상태머신을 감싸는 hook)
+
+- 배경/문제: ARCHITECTURE.md는 "무음 감지 후 턴 전환 규칙"을 로직 레이어로 분류해뒀지만,
+  "무음을 측정하는 타이머" 자체를 어디에 둘지는 명시돼 있지 않았다. `WebSpeechInputEngine`
+  내부(어댑터)에 둘 수도 있고, 상태머신 쪽(로직 레이어)에 둘 수도 있어 임의로 정하지 않고 확인.
+- 검토한 대안: (A) 로직 레이어 — `onInterimResult` 콜백만 소비하는 순수 디바운스 타이머를
+  상태머신을 감싸는 hook(`useConversationMachine`)에 둠. (B) `WebSpeechInputEngine` 내부 —
+  엔진이 직접 1.2초를 알고 타이밍을 결정.
+- 결정: (A).
+- 이유: 사람 확인받음. 타이머가 브라우저 API를 전혀 참조하지 않는 순수 알고리즘이라
+  로직 레이어에 두는 게 자연스럽고, PRD 3장 "mock 구현으로 교체해도 상태머신이 무변경으로
+  동작" 검증 기준과 정확히 부합(mock 엔진이 `onInterimResult`만 호출해주면 그대로 재사용/
+  테스트 가능). "1.2초"라는 제품 UX 상수가 특정 플랫폼 어댑터에 박히지 않아 네이티브 전환
+  시(`RNVoiceInputEngine`)에도 동일 로직 재사용 가능.
+- 영향받는 범위: `src/state-machine/silenceTimer.ts`(순수 타이머), `src/state-machine/useConversationMachine.ts`
+  (엔진 + reducer + 타이머 배선). `WebSpeechInputEngine`은 변경 없음.
+
+### 2026-08-24 무음(=발화 종료) 판단 기준: 커스텀 디바운스 타이머 (브라우저 네이티브 `speechend` 미사용)
+
+- 배경/문제: `WebSpeechInputEngine`은 이미 브라우저의 네이티브 `speechend` 이벤트를
+  `onSpeechEnd`로 전달하고 있어, 이를 그대로 "무음 감지" 신호로 쓸 수도 있었다. 하지만 MDN에
+  `speechend`의 정확한 타이밍이 명시돼 있지 않고(PRD가 요구하는 "~1.2초"를 보장 못 함),
+  Safari에서는 이 이벤트 자체가 신뢰 안 된다는 것을 지난 단계에서 확인했었다 — 무엇을 "무음"의
+  근거로 삼을지 임의로 정하지 않고 확인.
+- 검토한 대안: (A) 커스텀 디바운스 — `onInterimResult`가 호출될 때마다 1200ms 타이머를 리셋,
+  타이머가 끝까지 살아남으면 무음으로 판단. (B) 브라우저 네이티브 `speechend` 이벤트를 그대로
+  무음 신호로 사용.
+- 결정: (A).
+- 이유: 사람 확인받음. PRD가 명시한 구체적 수치(~1.2초)를 지킬 수 있는 유일한 방법이고,
+  브라우저/엔진 구현 편차(Safari 버그, Edge 지원 논쟁)를 전부 우회한다. "텍스트가 안 바뀜"이
+  "실제로 말을 멈춤"과 완전히 같지 않아 오탐(false cutoff) 가능성은 있지만, 이는 PRD 4장이
+  이미 알고 있고 "이어서 말하기" 버튼(다음 단계 범위)으로 완화하기로 설계된 리스크임.
+- 영향받는 범위: `src/state-machine/silenceTimer.ts`, `src/state-machine/useConversationMachine.ts`.
+  `onSpeechEnd`(네이티브 `speechend`)는 계속 전달만 받되 상태 전환에는 쓰지 않고 참고용
+  콘솔 로그로만 남김.
+
+### 2026-08-24 대화 상태머신(`useReducer`) 범위: 오늘 실제로 쓰이는 5개 상태만 구현
+
+- 배경/문제: PRD 6장은 assistant_speaking/listening/user_speaking/sending/streaming/error
+  6개 상태를 정의하지만, streaming(LLM 응답 수신)과 assistant_speaking(TTS 재생)은 아직
+  어댑터(LLM 스트리밍 클라이언트는 Day 4, `SpeechOutputEngine` 구현체는 Day 5)가 없어 지금
+  만들면 실제로 도달·테스트되지 않는 상태가 된다 — 상태머신을 이번 단계에서 얼마나 만들지
+  임의로 정하지 않고 확인.
+- 검토한 대안: (A) 오늘 실제로 배선되는 상태만 — idle/listening/user_speaking/sending/error
+  5개. (B) PRD 6장 6개 상태 타입을 지금 다 정의해두고, streaming/assistant_speaking은 타입만
+  있고 실제로 도달하지 않는 상태로 남김.
+- 결정: (A).
+- 이유: 사람 확인받음. CLAUDE.md의 "No half-finished implementations"·"design for hypothetical
+  future requirements 금지" 원칙에 부합 — 지금 당장 아무도 못 보내는 상태를 미리 만들어두는
+  건 미완성 코드를 완성된 것처럼 남겨두는 것과 같다고 판단. Day 4(LLM 스트리밍)에서 sending →
+  streaming, Day 5(TTS)에서 streaming → assistant_speaking → listening을 추가할 때
+  `conversationReducer`를 확장하면 됨 — reducer는 이벤트별 switch 구조라 상태 추가가
+  기존 케이스에 영향을 주지 않음.
+- 영향받는 범위: `src/state-machine/types.ts`(`ConversationStatus`), `src/state-machine/conversationReducer.ts`.
+  Day 4~5에서 상태/이벤트 추가 예정.
+
+### 2026-08-24 `unspokenPunctuation`(실험적 구두점 추론) 활성화
+
+- 배경/문제: 실기기로 무음 타이머를 테스트하던 중, 말끝을 올려 질문으로 말해도 인식 텍스트에
+  "?"가 안 붙는다는 걸 발견. 확인해보니 Web Speech API의 `SpeechRecognition`에
+  `unspokenPunctuation`이라는 속성이 있고(Chrome 151+, MDN에 "Experimental"로 표시, 호환성
+  표는 비어 있음), 기본값이 `false`라서 우리가 켜지 않는 한 구두점이 전혀 안 붙는다는 걸 확인.
+  GitHub explainer(`WebAudio/web-speech-api`)엔 "자연스러운 멈춤 + 문법 구조" 기반이라고만
+  나와 있고, 억양(피치)을 직접 분석한다는 근거는 못 찾음 — 확실치 않은 부분은 과장하지 않고
+  사람에게 그대로 전달한 뒤 켤지 확인.
+- 검토한 대안: (A) `recognition.unspokenPunctuation = true`로 켠다. (B) 안 켠다(PRD가 구두점
+  추론을 요구한 적 없어 범위 밖으로 볼 수도 있음).
+- 결정: (A).
+- 이유: 사람 확인받음. 미지원 브라우저에서 존재하지 않는 프로퍼티에 값을 대입하는 것뿐이라
+  에러 없이 조용히 무시되는 안전한 설정이라 리스크가 낮음. 다만 Experimental 기능이라 물음표가
+  기대만큼 안 잡힐 수 있다는 점은 사람에게 미리 전달함.
+- 영향받는 범위: `src/adapters/speech-input/WebSpeechInputEngine.ts`(`recognition.unspokenPunctuation
+  = true`), `src/adapters/speech-input/webSpeechRecognition.d.ts`(타입 선언 추가).
+- **실기기 재확인 결과(2026-08-24, 사람이 직접 크롬에서 테스트)**: 켜도 실제로는 "?"가 안
+  붙음 — 우려했던 대로 Experimental 기능이 기대만큼 동작하지 않는 사례로 확인됨. 중요도가
+  낮다고 판단해(사람 확인) 코드는 그대로 두고(무해한 설정이라 되돌릴 이유 없음) 더 이상 파고들지
+  않기로 함.
