@@ -120,6 +120,57 @@
      받아 PRD 11장 스코프 축소(수동 버튼 방식)는 발동하지 않기로 함(사람 확인, 표본이 많지
      않으니 Day 6~7 데모 준비 중 추가 확인 권장).
 
+## 3-1. Day 4: LLM 스트리밍 연동 (`claudeProxy.ts` + 상태머신 확장)
+
+- **`ConversationStatus` 확장**: `sending → streaming → listening`을 추가했다.
+  `assistant_speaking`은 이번에도 제외했다(Day 3와 같은 논리 — TTS 어댑터가 아직 없어 지금
+  추가하면 실제로 도달·검증되지 않는 상태가 된다, 사람 확인 후 결정, `docs/log/DECISIONS.md`
+  참고). 갱신된 상태 다이어그램(이번 단계 구현 범위):
+  ```
+  (idle|listening|user_speaking) --TEXT_SUBMITTED / user_speaking --SILENCE_TIMEOUT-->
+    sending --STREAM_STARTED--> streaming --STREAM_DELTA(반복)--> streaming
+    streaming --STREAM_DONE--> listening
+    (sending|streaming) --STREAM_ERROR--> error
+  ```
+- **`claudeProxy.ts` 설계**: `api/claude-stream.ts`가 Anthropic SDK 원본 이벤트를 그대로
+  `data: {...}\n\n`로 중계하고 `[DONE]`으로 끝난다는 걸 서버 코드를 직접 읽어 확인한 뒤, 그
+  형식에만 맞춰 fetch+`ReadableStream`으로 파싱했다(MDN 기준, 청크 경계 버퍼링 포함) — 상세
+  근거는 `docs/rules/ARCHITECTURE.md`. 클라이언트는 `/api/claude-stream`만 호출하고
+  `ANTHROPIC_API_KEY`는 존재조차 참조하지 않는다(코드 검색으로 자체 점검, 프로덕션 빌드
+  `dist/`에도 키 값이 없음을 확인).
+- **버그 발견 및 수정 — `useEffect`로 스트리밍을 트리거하면 자기 자신을 취소함**: 처음엔
+  `state.status === 'sending'`을 `useEffect(deps: [state.status])`로 감지해 LLM 호출을
+  트리거했는데, 그 안에서 `dispatch(STREAM_STARTED)`가 `status`를 바꾸는 순간 React가 같은
+  effect를 cleanup(→ 방금 만든 `AbortController.abort()`) 후 재실행해 방금 보낸 요청을 스스로
+  취소해버렸다. Playwright로 `net::ERR_ABORTED`를 실제로 확인 후, `start()`/`stop()`과 동일한
+  기존 패턴(이벤트가 발생하는 자리에서 직접 함수 호출)으로 바꿔 해결했다. 상세 원인 분석은
+  `docs/rules/ARCHITECTURE.md` 참고.
+- **대화 히스토리 윈도잉**: 상태머신(리듀서) 밖, `useConversationMachine`의 `historyRef`에
+  최근 대화를 쌓아두고, 매 전송마다 최근 `HISTORY_WINDOW_TURNS`(=3턴, 메시지 6개)만 슬라이스해
+  요청에 포함한다(PRD 8장 비용 통제 원칙). N=3은 사람 확인 후 결정했고, 상수 하나만 바꾸면
+  5턴으로 쉽게 조정 가능하게 만들었다(`docs/log/DECISIONS.md` 참고).
+- **로컬 개발 환경**: `npm run dev`(Vite)는 Vercel Serverless Function을 못 띄우므로,
+  `scripts/dev-api-server.ts`(Day 1의 `verify-claude-stream.ts`와 동일한 "핸들러를 Node http로
+  감싸기" 패턴의 상주판) + `vite.config.ts`의 `server.proxy`로 `/api`를 그쪽에 연결했다. Vercel
+  계정 연동은 실제 배포 시점(Day 6~7)으로 미룸(Day 1 원칙과 일관, 사람 확인 후 결정).
+- **실제 실행 검증**:
+  1. 결정론적 검증(`npm run verify:claude-proxy`): 청크가 이벤트 JSON 한복판에서 잘려도 정상
+     조립되는지, 서버 에러 이벤트, HTTP 레벨 실패, `[DONE]` 없이 끊긴 경우, `AbortError`가
+     감싸지지 않고 그대로 전달되는지 — 5개 시나리오 총 8개 체크 전부 PASS.
+  2. Playwright(headless Chromium) + 실제 Claude API(로컬 프록시 경유): 텍스트 입력 경로와
+     마이크 경로(Day 3와 동일한 가짜 `SpeechRecognition` 생성자로 "발화 후 침묵" 재현) 양쪽
+     모두 `sending/streaming` 상태를 거쳐 실제 Claude 응답이 화면에 반영되고 `listening`으로
+     복귀함을 확인. AI 응답 문단이 한 번에 나타나지 않고 여러 타임스탬프에 걸쳐 점진적으로
+     길어지는 것까지 확인(진짜 토큰 스트리밍 증빙, 통짜 응답 아님). 페이지 에러 0건.
+  3. `npx tsc -b`, `npm run lint` 통과 — 다만 새로 경고 1건이 추가됐다(`useConversationMachine.ts`
+     의 `useRef(createSilenceTimer(handleSilenceTimeout))`를 "렌더 중 ref 접근"으로 오탐).
+     `createSilenceTimer`가 콜백을 `setTimeout` 안에서만 호출한다는 걸 코드로 확인했고(동기
+     호출 없음), Day 3부터 있던 기존 1건(effect cleanup에서 ref 접근)과 같은 성격의 정적 분석
+     오탐으로 판단해 코드 주석으로 근거를 남기고 그대로 둠(사람 확인 후 유지 결정과 동일한
+     기준 적용).
+  4. `npm run verify:silence-timer`(Day 3 회귀 스위트, 21개 케이스) 재실행 — 전부 PASS, 기존
+     idle/listening/user_speaking/sending/error 전이 회귀 없음 확인.
+
 ## 4. 어댑터 분리 설계 근거
 
 ### `SpeechInputEngine` → `WebSpeechInputEngine` (Day 3)

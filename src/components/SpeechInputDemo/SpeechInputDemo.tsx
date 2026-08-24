@@ -7,7 +7,8 @@ const STATUS_LABEL: Record<string, string> = {
   idle: '대기 중',
   listening: '듣는 중…',
   user_speaking: '발화 인식 중',
-  sending: '전송 대기 상태 (LLM 연동은 Day 4 예정 — 아직 아무 것도 보내지 않음)',
+  sending: '전송 중… (Claude 응답 대기)',
+  streaming: 'AI 응답 스트리밍 중…',
   error: '오류',
 }
 
@@ -64,6 +65,15 @@ function SpeechInputDemo() {
       <p aria-live="polite" className="min-h-6 text-sm text-neutral-700">
         {state.transcript}
       </p>
+
+      {/* PRD 6장 목표: 실제 Claude 응답이 토큰 단위로 스트리밍 렌더링되는지 눈으로 확인하기
+          위한 임시 표시 영역 — 정식 ChatMessageList/ChatBubble은 Day 5(ConversationScreen)에서 만든다. */}
+      {(state.status === 'streaming' || state.assistantText) && (
+        <p aria-live="polite" className="min-h-6 whitespace-pre-wrap text-sm text-neutral-900">
+          <span className="font-medium">AI: </span>
+          {state.assistantText}
+        </p>
+      )}
 
       {isPermissionDenied && (
         <p aria-live="polite" className="text-sm text-neutral-600">

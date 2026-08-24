@@ -5,6 +5,16 @@ import { VitePWA } from 'vite-plugin-pwa'
 
 // https://vite.dev/config/
 export default defineConfig({
+  server: {
+    // Vercel Serverless Function(api/claude-stream.ts)은 `vite dev`가 직접 서빙하지 못한다 —
+    // 로컬 개발 중엔 `npm run dev:api`(scripts/dev-api-server.ts)로 띄운 상주 서버로 중계한다.
+    // Vercel 계정 연동 없이 로컬에서 실제 스트리밍을 확인하기 위한 선택(2026-08-25, 사람 확인,
+    // docs/log/DECISIONS.md 참고) — 실제 배포 시엔 Vercel이 같은 경로를 자체적으로 서빙하므로
+    // 이 proxy는 무관해진다.
+    proxy: {
+      "/api": "http://localhost:3301",
+    },
+  },
   plugins: [
     react(),
     tailwindcss(),

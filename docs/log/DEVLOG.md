@@ -406,10 +406,80 @@
 
 ## Day 4 — LLM 스트리밍
 
-- 요청 내용:
+- 요청 내용: (1) `src/api/claudeProxy.ts` — `api/claude-stream.ts`(Day 1에 검증된 서버 프록시)를
+  호출하는 클라이언트 함수. 서버 코드를 직접 읽어 실제 SSE 형식을 확인한 뒤 그 형식에 맞춰
+  파싱(추측 금지). (2) 상태머신에 `sending → streaming → listening` 추가 — `assistant_speaking`
+  처리 방식은 임의로 정하지 말고 먼저 확인. (3) 대화 히스토리 윈도잉(PRD 8장) — N을 임의로
+  정하지 말고 제안 후 확인. 이번 단계는 `SpeechInputDemo`(임시 디버그 컴포넌트)를 확장하는
+  선에서만 진행하고 `ChatMessageList`/`ChatBubble` 등 정식 UI는 Day 5로 미룸.
 - 완료 사항:
-- DoD 체크: [ ] 마이크/텍스트 입력 → 실제 스트리밍 렌더링 확인
+  - **사람 확인 후 결정한 것 3가지**(근거는 `docs/log/DECISIONS.md` 2026-08-25 항목들 참고):
+    1. `assistant_speaking`은 이번에도 제외 — TTS 어댑터(Day 5)가 없어 지금 추가하면 미완성
+       상태가 됨. `streaming → listening`으로 직결.
+    2. 히스토리 윈도잉 N = 3턴(메시지 6개)으로 시작, 실사용해보고 5턴으로 조정 가능하게
+       `HISTORY_WINDOW_TURNS` 상수 하나로 분리.
+    3. 로컬 개발 중 `/api/claude-stream` 연결 방식 — Vercel 계정 연동(`vercel dev`)은 실제
+       배포 시점(Day 6~7)으로 미루고, 지금은 Day 1의 `verify-claude-stream.ts` 패턴을 재사용한
+       상주형 로컬 서버(`scripts/dev-api-server.ts`) + `vite.config.ts`의 `server.proxy`로 우회.
+  - `src/api/claudeProxy.ts`: `api/claude-stream.ts`를 직접 읽어 확인한 형식(Anthropic SDK 원본
+    이벤트를 그대로 `data: {...}\n\n`로 중계, `[DONE]`으로 종료, 에러 시
+    `data: {"type":"error",...}`)에 맞춰 fetch+`ReadableStream`으로 SSE 파싱(MDN "Using readable
+    streams" 기준, 청크 경계 버퍼링 포함). `[DONE]` 없이 스트림이 끊기면 네트워크 에러로 처리.
+    `AbortController`로 취소한 경우는 `ClaudeStreamError`로 감싸지 않고 그대로 전달.
+  - `src/state-machine/types.ts`/`conversationReducer.ts`: `streaming` 상태와
+    `STREAM_STARTED`/`STREAM_DELTA`/`STREAM_DONE`/`STREAM_ERROR` 이벤트 추가.
+    `assistantText` 필드 신설(사용자 발화 `transcript`와 분리).
+  - `src/state-machine/useConversationMachine.ts`: 최근 대화를 `historyRef`에 쌓아두고 매 전송마다
+    최근 3턴만 슬라이스해 `claudeProxy`를 호출하는 `runSendCycle()` 추가.
+    **버그 발견 및 수정**: 처음엔 `useEffect(deps: [state.status])`로 "`sending` 진입"을 감지해
+    스트리밍을 트리거했는데, 그 안의 `dispatch(STREAM_STARTED)`가 `status`를 바꾸는 순간 React가
+    같은 effect를 cleanup(→ 방금 만든 `AbortController.abort()`)했다가 재실행해 방금 보낸 요청을
+    스스로 취소하는 버그였다(Playwright로 `net::ERR_ABORTED` 실제 확인). `start()`/`stop()`과
+    동일한 기존 패턴(이벤트 발생 지점에서 직접 함수 호출)으로 바꿔 해결 — 상세 원인은
+    `docs/rules/ARCHITECTURE.md` 참고.
+  - `src/components/SpeechInputDemo/SpeechInputDemo.tsx`: AI 응답을 `aria-live`로 노출하는
+    임시 표시 영역 추가(정식 `ChatMessageList`/`ChatBubble`은 Day 5에서 `ConversationScreen`과
+    함께 조립 예정, 이번엔 만들지 않음).
+  - `scripts/dev-api-server.ts`(신규, 배포 대상 아님): `api/claude-stream.ts` 핸들러를 상주
+    Node 서버로 감싸 로컬 개발 중 실제 Claude API 스트리밍을 확인할 수 있게 함.
+    `vite.config.ts`에 `/api → localhost:3301` proxy 추가, `package.json`에 `dev:api` 스크립트
+    추가.
+  - `scripts/verify-claude-proxy-parsing.ts`(신규, `npm run verify:claude-proxy`): 가짜
+    fetch/ReadableStream을 주입해 SSE 파싱을 결정론적으로 검증 — 청크가 이벤트 JSON 한복판에서
+    잘리는 경우, 서버 에러 이벤트, HTTP 레벨 실패, `[DONE]` 없이 끊긴 경우, `AbortError` 전달
+    방식까지 5개 시나리오 8개 체크 전부 PASS.
+  - **실제 실행 검증(Playwright + 실제 Claude API, 로컬 프록시 경유)**:
+    1. 텍스트 입력 경로: 미지원 브라우저 재현(Day 3와 동일 기법) 후 텍스트 전송 →
+       `sending`/`streaming`을 거쳐 실제 Claude 응답이 화면에 반영되고 `listening`으로 복귀
+       확인. AI 응답 문단이 한 번에 나타나지 않고 서로 다른 타임스탬프(+125ms, +1033ms,
+       +1238ms)에 걸쳐 점진적으로 길어지는 것을 실측 — 통짜 응답이 아니라 진짜 토큰 스트리밍임을
+       확인.
+    2. 마이크 경로: Day 3에서 검증에 쓴 것과 동일한 가짜 `SpeechRecognition` 생성자로 "발화 후
+       침묵"을 재현 → 무음 1.2초 뒤 자동으로 `sending/streaming` 전환 → 실제 Claude 응답
+       스트리밍까지 완주 확인(응답 예: "바다가 파란 것은 주로 두 가지 이유 때문입니다: ...").
+       페이지 에러 0건.
+    3. `npm run verify:silence-timer`(Day 3 회귀 스위트, 21개 케이스) 재실행 — 전부 PASS, 기존
+       5개 상태 전이 회귀 없음 확인.
+    4. API 키 미노출 자체 점검: `src/` 코드 전체에서 `ANTHROPIC_API_KEY`/`apiKey` 참조 없음(클라
+       이언트는 `/api/claude-stream`만 호출), `npm run build` 산출물(`dist/`)에 실제 키 값과
+       `sk-ant-` 패턴 둘 다 없음을 grep으로 확인.
+    5. `npx tsc -b`, `npm run lint` 통과. 새 경고 1건 추가(`useConversationMachine.ts`의
+       `useRef(createSilenceTimer(handleSilenceTimeout))`를 "렌더 중 ref 접근"으로 오탐 —
+       `createSilenceTimer`가 콜백을 `setTimeout` 안에서만 부른다는 걸 코드로 확인해 정적 분석
+       오탐으로 판단, 기존 1건과 같은 기준으로 주석 남기고 유지) — 기존 1건과 합쳐 총 2건.
+- DoD 체크: **[x] 마이크/텍스트 입력 → 실제 Claude 응답이 타이핑되듯 스트리밍 렌더링 (양쪽
+  경로 모두 실제 API로 확인 완료)**.
 - 이슈/메모:
+  - `ChatMessageList`/`ChatBubble` 등 정식 채팅 UI는 이번에 만들지 않음 — `SpeechInputDemo`가
+    여전히 임시 디버그 컴포넌트 역할. Day 5에서 `ConversationScreen`과 함께 정식 조립 예정.
+  - `stop()`(중지/초기화) 및 언마운트 시 진행 중인 스트리밍 요청도 `AbortController`로 취소하게
+    해뒀다(비용 통제 차원 — 화면을 벗어나도 API 호출이 배경에서 계속 도는 낭비를 막음).
+  - "이어서 말하기" 버튼을 `sending` 상태에서 누르는 경우, 이론적으로는 이미 나간 API 요청을
+    취소하지 않고 응답을 버리기만 한다 — 다만 `STREAM_STARTED` 디스패치가 `sending → streaming`
+    으로 사실상 동기적으로 바뀌어(같은 자바스크립트 태스크 안에서 처리) 사람이 버튼을 누를 수
+    있는 시점엔 이미 `streaming`으로 넘어가 있어 버튼 자체가 안 보인다(가시성 규칙이
+    `user_speaking`/`sending`에서만 노출). 실질적으로 발생하기 어려운 경계 케이스라 이번엔 별도
+    취소 로직을 추가하지 않음.
 
 ## Day 5 — TTS & 자동 사이클 완성
 
