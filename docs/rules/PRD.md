@@ -160,8 +160,26 @@ sending → streaming(LLM 응답 수신 중) → assistant_speaking → listenin
 이를 위해 각 브라우저 API를 인터페이스 뒤에 캡슐화한다:
 
 ```tsx
+type SpeechInputErrorReason =
+  | 'unsupported'
+  | 'permission-denied'
+  | 'no-speech'
+  | 'audio-capture'
+  | 'network'
+  | 'aborted'
+  | 'unknown';
+
+interface SpeechInputError {
+  reason: SpeechInputErrorReason;
+  message?: string;
+}
+
 interface SpeechInputEngine {
-  start(onInterimResult: (text: string) => void, onSpeechEnd: () => void): void;
+  start(
+    onInterimResult: (text: string) => void,
+    onSpeechEnd: () => void,
+    onError: (error: SpeechInputError) => void,
+  ): void;
   stop(): void;
 }
 interface SpeechOutputEngine {
@@ -173,6 +191,11 @@ interface ReminderEngine {
 // 이번 주: WebSpeechInputEngine, WebSpeechSynthesisEngine, BrowserNotificationEngine
 // 네이티브 전환 시: RNVoiceInputEngine, RNTTSEngine, ExpoNotificationEngine (상위 상태머신 무변경)
 ```
+
+> **Day 3 변경**: `SpeechInputEngine.start()`에 `onError` 콜백 추가 (Day 1 확정 시그니처에는
+> 마이크 권한 거부·인식 에러를 알릴 방법이 없었음). 근거는 `docs/log/DECISIONS.md`,
+> `docs/rules/ARCHITECTURE.md` 참고.
+> 
 
 **마이그레이션 유의사항 메모** (지금 처리하지 않아도 되지만 기록해둠):
 

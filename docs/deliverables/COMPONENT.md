@@ -28,7 +28,54 @@
 
 ## 4. 어댑터 분리 설계 근거
 
-*(작성 예정 — `SpeechInputEngine`/`SpeechOutputEngine` 구현체는 Day 3에서 추가 작성)*
+### `SpeechInputEngine` → `WebSpeechInputEngine` (Day 3)
+
+- **인터페이스 변경**: Day 1 시그니처(`start(onInterimResult, onSpeechEnd)`)에는 에러를 상위에
+  알릴 방법이 없었다. 실제 구현 중 발견해 사람 확인 후 `onError` 콜백을 추가했다
+  (`docs/log/DECISIONS.md` 2026-08-24 참고). `SpeechInputError`는 브라우저의
+  `SpeechRecognitionErrorCode`를 그대로 노출하지 않고 `SpeechInputErrorReason`(예:
+  `permission-denied`, `no-speech`, `audio-capture`, `network`)으로 번역해서 올린다 — 상위
+  상태머신이 브라우저 전용 타입을 몰라도 되게 하기 위함(7장 어댑터 분리 원칙).
+- **feature detection**: `window.SpeechRecognition ?? window.webkitSpeechRecognition` 생성자
+  존재 여부만 체크(`isSpeechInputSupported()`). Safari는 생성자가 존재해 "지원함"으로 판정되며,
+  이는 UA 스니핑을 피하기 위한 의도된 선택 — 실제로는 Safari의 `continuous` 모드에 런타임 버그가
+  있다는 걸 알지만(MDN/WebKit 이슈 트래커로 확인), API 부재와 런타임 버그는 다른 문제라고 보고
+  표준 feature-detection만 쓰기로 사람 확인 후 결정(`docs/log/DECISIONS.md` 참고).
+- **`onInterimResult` 콜백 값**: 브라우저의 `SpeechRecognitionEvent.results`는
+  `resultIndex`부터의 "변경분"만 담고 있지만, 매번 세션 시작 이후 누적된 전체 텍스트를 조립해서
+  통째로 넘긴다 — 호출자가 브라우저 이벤트의 인덱싱 구조를 몰라도 화면에 그대로 표시할 수 있게
+  하기 위한 선택(구현 세부사항, 인터페이스 시그니처와 무관해 임의로 결정).
+- **`onSpeechEnd` ↔ 브라우저 `speechend` 이벤트 매핑**: PRD 6장의 "무음 타이머(~1.2초) 기반
+  발화 종료 감지"는 이번 단계 범위 밖(다음 단계에서 별도로 구현 예정)이라, 지금은 브라우저의
+  네이티브 `speechend` 이벤트를 그대로 전달만 한다. **알려진 불확실성**: `continuous: true`
+  모드에서 `speechend`가 발화당 몇 번, 정확히 몇 초의 무음 후에 발생하는지는 MDN에 명시돼 있지
+  않고 브라우저마다 다를 수 있어, 다음 단계(커스텀 무음 타이머 구현)에서 실제 브라우저로 타이밍을
+  다시 실측해야 한다.
+- **continuous 세션 자동 재시작**: `continuous: true`여도 브라우저가 예고 없이 세션을 끊을 수
+  있다(장시간 무음 등, 브라우저별 동작). `stop()`을 호출한 적이 없고 직전 에러가 치명적이지
+  않았다면(`no-speech`만 재시작 허용, `permission-denied`/`audio-capture`/`network`/`aborted`는
+  재시작 안 함) 같은 인스턴스에서 `recognition.start()`를 다시 불러 "계속 듣기" 의도를 지킨다 —
+  `continuous: true`를 요청한 이상 필요한 동작이라고 판단해 별도 확인 없이 구현, 근거는 여기 기록.
+- **마이크 권한 플로우**: `SpeechInputEngine`엔 별도 권한 요청 메서드가 없다(Day 1부터 없었고
+  이번에도 추가하지 않음) — Web Speech API 자체가 `recognition.start()` 호출 시 브라우저가
+  필요하면 알아서 권한 프롬프트를 띄우는 구조라, `NotificationSetup`의 `Notification.requestPermission()`과
+  달리 별도 "요청" API가 없다. 권한 상태(허용/거부)는 `start()` 이후 `onerror`의
+  `not-allowed`/`service-not-allowed` → `permission-denied`로만 알 수 있다.
+- **실제 실행 검증**: Playwright(headless Chromium)로 (1) `webkitSpeechRecognition` 생성자
+  존재 확인, (2) 생성자를 제거한 뒤 재로드 시 미지원 안내 문구 노출 + 시작 버튼 미노출, (3)
+  `context.grantPermissions(['microphone'])` + fake device로 정상 listening 진입(실제 발화
+  인식은 headless 환경 특성상 검증 불가, 에러 없이 listening 상태 진입까지만 확인), (4) 브라우저의
+  실제 마이크 권한 다이얼로그는 headless 환경에서 응답 없이 무한 대기하는 제약이 있어(Day 2의
+  `Notification.permission` headless 제약과 같은 종류) `SpeechRecognitionErrorEvent`와 동일한
+  모양의 가짜 생성자를 주입해 `not-allowed`/`service-not-allowed`(차단 안내 노출) /
+  `audio-capture`/`network`(에러 배너 노출, 재시작 안 함) / `no-speech`(재시작 허용) 5가지
+  에러 경로를 모두 확인, (5) 시작/중지 버튼 상태 토글 및 정상 종료 확인. 콘솔 unhandled error 없음.
+  `npx tsc -b`, `npm run lint` 모두 통과.
+- **임시 디버그 UI**: `src/components/SpeechInputDemo/SpeechInputDemo.tsx`를 `App.tsx`에 임시로
+  붙여 눈으로 확인 가능하게 함(Day 2의 `NotificationSetup` 임시 배치와 같은 패턴).
+  `ConversationScreen`이 생기면 이 데모는 제거하고 실제 화면으로 통합 필요.
+
+*(`SpeechOutputEngine` 구현체는 아직 미작성 — Day 5 예정)*
 
 ### `ReminderEngine` → `BrowserNotificationEngine` (Day 2)
 

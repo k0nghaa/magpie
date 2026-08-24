@@ -89,3 +89,42 @@
 - 결정: (B).
 - 이유: 사람 확인받음(재시도 로직은 이 PoC 스코프에서 과하다는 점엔 이견 없었음). (A)는 PRD 목표("모든 예외 상태가 UI로 명시적으로 처리된다")에 못 미침. (C)는 원인과 무관하게 항상 별도 UI를 노출해 과설계. (B)는 가장 현실적인 실패 원인(권한 변경)에 대해서는 이미 만들어둔 예외 시나리오 UI를 재사용해 새 코드 없이 해결하고, 그 외 드문 원인은 콘솔 로그로 충분하다고 판단.
 - 영향받는 범위: `src/components/NotificationSetup/NotificationSetup.tsx`(`getCurrentPermission`, `onFire` 콜백의 `.catch()`).
+
+### 2026-08-24 `SpeechInputEngine.start()`에 `onError` 콜백 추가 (Day 1 시그니처 변경)
+
+- 배경/문제: Day 1에 확정된 시그니처(`start(onInterimResult, onSpeechEnd): void`)에는 에러를
+  상위에 알릴 방법이 없다. 그런데 Day 3에서 실제로 구현해보니 마이크 권한 거부(`not-allowed`),
+  인식 서비스 차단(`service-not-allowed`), 오디오 캡처 실패, 네트워크 오류 등은 상태머신이
+  "정상적으로 말이 끝남"(`onSpeechEnd`)과 구분해서 알아야 하는 정보다(PRD 6장의 "어느 상태든
+  실패 → error → (재시도) → listening" 전환과 직결). 시그니처를 임의로 바꾸지 않고 먼저 확인.
+- 검토한 대안: (A) `onError` 콜백 추가로 시그니처 확장. (B) 시그니처 유지, 에러 시에도
+  `onSpeechEnd`만 호출(상태머신이 에러와 정상 종료를 구분 못 함). (C) 이번 단계는 구현체만
+  만들고 에러 전파 설계는 다음 단계로 미룸.
+- 결정: (A).
+- 이유: 사람 확인받음. PRD가 이미 "에러 → error 상태"라는 명확한 요구사항을 갖고 있어서(B)는
+  요구사항 미달. 에러 정보를 담는 타입(`SpeechInputError` / `SpeechInputErrorReason`)은 브라우저의
+  `SpeechRecognitionErrorCode`를 그대로 노출하지 않고 어댑터가 번역한 값만 노출 — 7장 어댑터
+  분리 원칙(로직 레이어가 어댑터 구현체를 몰라야 함)을 그대로 유지.
+- 영향받는 범위: `src/adapters/types.ts`(`SpeechInputEngine`/`SpeechInputError`/`SpeechInputErrorReason`
+  신설), `docs/rules/PRD.md` 7장, `docs/rules/ARCHITECTURE.md` 인터페이스 계약, 향후 상태머신
+  구현 시 `onError` 처리 필요.
+
+### 2026-08-24 `WebSpeechInputEngine` feature detection 기준: 생성자 존재 여부만 체크 (UA 스니핑 안 함)
+
+- 배경/문제: PRD 4장은 "연속 음성인식 미지원 브라우저(Safari 등)"를 텍스트 폴백 대상으로 명시한다.
+  그런데 실제로 확인해보니(MDN, WebKit/web-speech-api 이슈, Apple 커뮤니티 포럼) Safari는
+  `webkitSpeechRecognition` 생성자 자체는 존재하고, `continuous: true`에서 마이크가 멈추지
+  않거나 결과가 아예 안 오는 **런타임 버그**만 있다 — API 부재가 아니다. PRD 문구를 문자 그대로
+  따르려면 UA 스니핑으로 Safari를 미리 배제해야 하는데, 이는 표준 feature-detection과 다른
+  접근이라 임의로 정하지 않고 확인.
+- 검토한 대안: (A) 표준 방식 — 생성자 존재 여부만 체크, Safari도 "지원함"으로 판정하고 실제
+  시도. (B) PRD 문구대로 — 생성자 체크에 더해 Safari를 UA로 감지해 강제로 "미지원" 처리.
+- 결정: (A).
+- 이유: 사람 확인받음. UA 스니핑은 브리틀하고(Safari 버전마다 실제 버그 유무가 다를 수 있고,
+  Apple이 버그를 고치면 근거 없이 계속 차단하게 됨) 안티패턴으로 알려져 있음. 또한 Edge(Chromium)도
+  이론상 지원해야 하지만 실제 동작에 대한 논쟁(`mdn/browser-compat-data#22126`, 미해결)이 있어,
+  "이름으로 브라우저를 판별"하는 접근 자체가 이번 생태계에서 신뢰하기 어렵다고 판단.
+- 영향받는 범위: `src/adapters/speech-input/WebSpeechInputEngine.ts`(`isSpeechInputSupported`).
+  **알려진 한계**: Safari/Edge에서 생성자는 있지만 런타임에 조용히 실패하는 경우, 이번 단계
+  범위(feature detection)로는 못 잡는다 — 무음 타이머·재시도 로직을 만드는 다음 단계에서 실제
+  브라우저로 재검증 필요 (`docs/rules/ARCHITECTURE.md`의 `WebSpeechInputEngine` 메모 참고).

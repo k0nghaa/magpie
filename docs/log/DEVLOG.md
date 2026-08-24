@@ -167,10 +167,61 @@
 
 ## Day 3 — 음성 입력 & 자동 턴 감지
 
-- 요청 내용:
+### 1차 — `WebSpeechInputEngine` 구현체 + feature detection + 마이크 권한 플로우 (2026-08-24)
+
+- 요청 내용: Day 3 전체 범위 중 3가지만 우선 진행 — (1) `SpeechInputEngine`(Day 1 정의)의
+  실제 구현체 `WebSpeechInputEngine`(Web Speech API, `continuous: true`), (2) 연속 음성인식
+  feature detection → 미지원 시 텍스트 모드 폴백 "판단 로직"만(텍스트 입력 UI 자체는 제외),
+  (3) 마이크 권한 요청/허용/거부 플로우. 무음 타이머(~1.2초) 기반 자동 전송, 오탐 복구 버튼은
+  이번 요청 범위 밖(다음 단계).
 - 완료 사항:
-- DoD 체크: [ ] 실시간 인식 텍스트 반영 [ ] 무음 시 자동 전송 [ ] 오탐 복구 버튼 동작 [ ] 미지원 환경 텍스트 폴백
+  - 코드 작성 전 Web Speech API의 브라우저 지원 현황을 MDN(`SpeechRecognition`, `continuous`,
+    `speechend`/`end` 이벤트, `SpeechRecognitionErrorEvent/error`), caniuse, GitHub 이슈
+    (`mdn/browser-compat-data#22126`)로 직접 확인 — 오래된/추측성 정보에 기대지 않음. 확인
+    결과는 `docs/rules/ARCHITECTURE.md`의 `WebSpeechInputEngine` 메모에 정리.
+  - **인터페이스 확장(Day 1 시그니처 변경, 사람 확인 후 결정)**: `SpeechInputEngine.start()`에
+    `onError` 콜백 추가. 마이크 권한 거부·인식 에러를 상태머신에 알릴 방법이 원래 시그니처엔
+    없었음. `SpeechInputError`/`SpeechInputErrorReason` 타입 신설(`src/adapters/types.ts`) —
+    브라우저의 `SpeechRecognitionErrorCode`를 그대로 노출하지 않고 어댑터가 번역.
+  - **feature detection 기준(사람 확인 후 결정)**: `window.SpeechRecognition ??
+    window.webkitSpeechRecognition` 생성자 존재 여부만 체크(표준 방식, UA 스니핑 안 함).
+    Safari도 생성자가 있어 "지원함"으로 판정되며, `continuous` 모드의 실제 런타임 버그는 이번
+    단계 범위 밖으로 남김(근거: `docs/log/DECISIONS.md`).
+  - `src/adapters/speech-input/webSpeechRecognition.d.ts`: TypeScript `lib.dom.d.ts`에
+    `SpeechRecognition` 생성자 자체와 `Window.webkitSpeechRecognition`이 없어(관련 이벤트/에러
+    타입만 있음) 최소한의 ambient 타입 선언 추가.
+  - `src/adapters/speech-input/WebSpeechInputEngine.ts`: `continuous: true` + `interimResults:
+    true`로 연동, `onresult`는 세션 누적 전체 텍스트를 `onInterimResult`로 전달, `onspeechend`를
+    `onSpeechEnd`로 그대로 전달, `onerror`는 브라우저 에러 코드를 `SpeechInputErrorReason`으로
+    번역해 `onError`로 전달. `continuous: true` 세션이 예고 없이 끊겨도(`onend`) `stop()`을
+    부른 적 없고 직전 에러가 치명적이지 않으면(`no-speech`만 재시작 허용) 같은 인스턴스로
+    재시작 — "계속 듣기" 의도를 지키기 위한 구현 세부사항(자세한 근거는 COMPONENT.md).
+  - `src/components/SpeechInputDemo/SpeechInputDemo.tsx`: 실제 브라우저 확인용 임시 디버그
+    컴포넌트(`App.tsx`에 임시 배치, Day 2의 `NotificationSetup` 패턴과 동일). 시작/중지 버튼,
+    실시간 인식 텍스트, 미지원/권한거부/기타 에러 안내를 `aria-live`로 노출.
+  - **실제 실행 검증(Playwright, headless Chromium)**: (1) `webkitSpeechRecognition` 생성자
+    존재 및 데모 렌더링 확인, (2) 생성자를 초기화 스크립트로 제거한 뒤 재로드 → 미지원 안내
+    문구 노출 + 시작 버튼 미노출 확인, (3) `context.grantPermissions(['microphone'])` +
+    `--use-fake-device-for-media-stream`으로 정상 listening 진입(에러 없음) 확인, (4) 브라우저의
+    실제 마이크 권한 다이얼로그가 headless 환경에서 응답 없이 무한 대기하는 제약을 발견(Day 2의
+    `Notification.permission` headless 제약과 같은 종류) → `SpeechRecognitionErrorEvent`와
+    동일한 모양의 가짜 생성자를 주입해 `not-allowed`/`service-not-allowed`(차단 안내 노출),
+    `audio-capture`/`network`(에러 배너 노출 후 재시작 안 함), `no-speech`(재시작 허용) 경로를
+    모두 확인, (5) 시작/중지 버튼 상태 토글과 정상 종료(잔여 "듣는 중" 텍스트 없음) 확인. 콘솔
+    unhandled pageerror 0건. `npx tsc -b`, `npm run lint` 모두 통과.
+- DoD 체크: [x] 미지원 환경 텍스트 폴백 판단 로직 (텍스트 입력 UI는 다음 단계) [x] 마이크
+  권한 허용/거부 플로우 동작 확인 — [ ] 실시간 인식 텍스트 반영(엔진 자체는 구현·검증했으나
+  headless 환경 특성상 실제 음성으로 인식 텍스트가 채워지는 것까지는 확인 못 함, 로컬 실기기
+  마이크로 재확인 권장) [ ] 무음 시 자동 전송, [ ] 오탐 복구 버튼 — 다음 단계 범위.
 - 이슈/메모:
+  - Safari(생성자는 있으나 `continuous` 런타임 버그)와 Edge(지원 여부 자체가 논쟁 중,
+    `mdn/browser-compat-data#22126` 미해결)는 feature detection으로 걸러지지 않는다 — 다음
+    단계(무음 타이머·재시도 로직)에서 실기기로 재검증 필요.
+  - `onSpeechEnd`는 지금 브라우저 네이티브 `speechend` 이벤트를 그대로 전달만 함.
+    `continuous: true`에서 발화당 정확히 몇 초 무음 후 발생하는지는 MDN에 명시돼 있지 않아,
+    다음 단계의 커스텀 무음 타이머(~1.2초) 구현 시 실제 타이밍을 다시 실측해야 함.
+  - `SpeechInputDemo`는 임시 디버그 컴포넌트 — `ConversationScreen`이 생기면 제거하고 실제
+    화면으로 통합 필요.
 
 ## Day 4 — LLM 스트리밍
 
