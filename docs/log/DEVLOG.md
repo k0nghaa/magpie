@@ -604,6 +604,59 @@
 - DoD 체크: [ ] Happy Path 3턴 이상 클릭 없이 자동 반복 완주
 - 이슈/메모:
 
+## 배포 인프라 사전 검증 — `api/claude-stream.ts` 실서비스 스트리밍 확인 (2026-08-25)
+
+- 요청 내용: Day 6~7 본작업 전에, `api/claude-stream.ts`를 실제 Vercel에 배포했을 때도 로컬과
+  동일하게 진짜 스트리밍(청크 단위 시간차 도착)이 되는지만 선행 확인. 전체 프론트엔드 배포·
+  최종 정리는 이번 범위 밖. 버퍼링되면 Vercel 공식 문서로 원인(Edge Runtime 필요 여부 등)을
+  확인하고, 막히면 무리하지 말고 바로 보고.
+- 완료 사항:
+  - `main` 기준 새 브랜치(`day6/vercel-stream-verify`) 생성.
+  - Vercel CLI 로그인(사용자가 직접 `vercel login` 수행) → `vercel link`로 프로젝트를
+    `leekyeonghas-projects` 팀 스코프에 연결(신규 프로젝트 `leekyeonghas-projects/magpie` 생성).
+    GitHub 저장소 자동 연동은 권한 문제로 실패했으나 CLI 배포 자체에는 영향 없음.
+  - `.env`의 `ANTHROPIC_API_KEY`를 Vercel 프로젝트의 Production/Preview 환경변수로 등록
+    (`vercel env add`, Sensitive 타입). `CLAUDE_MODEL`은 기본값(`claude-haiku-4-5`)을 그대로 써서
+    별도 설정 안 함(CLAUDE.md 8장 "반복 테스트는 Haiku로" 원칙과 일치).
+  - `vercel deploy`로 배포(첫 배포라 Vercel이 자동으로 production에 배정 —
+    `https://magpie-five-iota.vercel.app`).
+  - 배포된 URL의 `/api/claude-stream`에 직접 요청을 보내 청크 도착 시각을 기록하는 검증
+    스크립트(Day 1 `scripts/verify-claude-stream.ts`와 동일한 방식, 원격 URL만 인자로 받도록
+    수정한 임시 스크립트, 저장소에는 커밋하지 않음)를 세션 스크래치패드에 작성해 실행.
+  - **실제 실행 결과**:
+    ```
+    Response status: 200 OK
+    Headers: content-type=text/event-stream
+    [+1078ms] chunk #1 (647 bytes)
+    [+1375ms] chunk #2 (265 bytes)
+    [+1717ms] chunk #3 (258 bytes)
+    [+2033ms] chunk #4 (245 bytes)
+    [+2358ms] chunk #5 (238 bytes)
+    [+2664ms] chunk #6 (231 bytes)
+    [+3054ms] chunk #7 (262 bytes)
+    [+3341ms] chunk #8 (184 bytes)
+    [+3612ms] chunk #9 (273 bytes)
+    [+3927ms] chunk #10 (198 bytes)
+    [+4246ms] chunk #11 (224 bytes)
+    [+4559ms] chunk #12 (208 bytes)
+    [+4731ms] chunk #13 (148 bytes)
+    [+4741ms] chunk #14 (263 bytes)
+    [+4742ms] chunk #15 (45 bytes)
+    총 청크 15개, 총 소요 4743ms
+    ```
+    15개 청크가 약 4.7초에 걸쳐 250~350ms 간격으로 순차 도착 — 한 번에 통짜로 오는 버퍼링이
+    아니라 로컬(Day 1)에서 본 것과 동일한 패턴의 실제 스트리밍임을 확인.
+  - 결론: 별도의 Edge Runtime 전환이나 추가 설정 없이, 기본 Vercel Node.js 서버리스 함수
+    설정(`@vercel/node` 타입, `vercel.json` 없음) 그대로 프로덕션에서도 진짜 스트리밍이 동작함.
+    Vercel 공식 문서 확인 절차(버퍼링 원인 조사)는 필요 없었음 — 버퍼링 자체가 발생하지 않음.
+- DoD 체크: 해당 없음(Day N 정식 DoD 항목이 아니라 Day 6~7 전 선행 인프라 확인).
+- 이슈/메모:
+  - GitHub 저장소(`k0nghaa/magpie`) ↔ Vercel 프로젝트 자동 연동이 권한 문제로 실패한 상태 —
+    Day 6~7에 실제 최종 배포/데모 링크를 확정할 때 다시 확인 필요(현재는 CLI로 직접
+    `vercel deploy`하는 방식만 검증됨).
+  - 이번 배포는 API 함수 하나의 스트리밍 동작 확인이 목적이라 프론트엔드 정식 배포용 설정
+    (커스텀 도메인, GitHub 연동을 통한 자동 배포 등)은 다루지 않음 — Day 7 최종 정리 때 필요.
+
 ## Day 6 — 성능 & 접근성
 
 - 요청 내용:
