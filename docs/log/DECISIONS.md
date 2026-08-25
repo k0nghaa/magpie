@@ -390,6 +390,27 @@
   상태로 연결하는 것은 Service Worker↔페이지 메시징이 추가로 필요해 이번엔 포함하지 않음
   (`src/sw.ts`의 `notificationclick`은 여전히 루트만 엶 — 기존에도 알려진 제한).
 
+### 2026-08-25 SW↔페이지 메시징으로 "알림 클릭 → 대화 화면 자동 진입" 연결 (위 항목의 범위 밖 사유 해소)
+
+- 배경/문제: Vercel 배포본에서 실사용 테스트 중 발견 — 지정 시각에 브라우저 알림은 뜨지만
+  클릭해도 대화 화면으로 넘어가지 않음(PRD 4장 Happy Path 3번 미충족). 원인은 바로 위 항목에서
+  범위 밖으로 남긴 대로 `src/sw.ts`의 `notificationclick`이 탭 focus/openWindow만 하고
+  `App.tsx`의 화면 상태(`screen`)로 신호를 보내지 않기 때문— 새 버그가 아니라 이미 알고
+  있던 미구현 항목.
+- 검토한 대안: (A) 지금 구현 (B) Day 6~7 축소 스코프에 없던 항목이므로 이번엔 스킵하고 성능
+  작업 먼저 진행 (C) 기록만 남기고 결정은 나중으로. 세 가지를 사람에게 제시.
+- 결정: (A). 사람 확인받음 — PRD 4장 핵심 Happy Path에 해당해 성능 작업보다 먼저 고침.
+- 구현: 이미 열려 있는 탭엔 SW가 `existing.postMessage({type: 'OPEN_CONVERSATION'})`을 보내고
+  `App.tsx`가 `navigator.serviceWorker`의 `message` 이벤트로 받아 `setScreen('conversation')`.
+  새로 여는 탭은 아직 페이지의 message 리스너가 마운트되기 전이라 postMessage가 유실될 수 있어
+  대신 `self.clients.openWindow('/?screen=conversation')`으로 열고, `App.tsx`가 mount 시
+  `URLSearchParams`로 이 쿼리를 읽어 초기 화면을 바로 `conversation`으로 결정.
+- 검증: `vite build`(tsc 포함, SW injectManifest 빌드 포함) 통과. `vite preview` + Playwright로
+  두 경로 모두 실행 확인 — ①`/?screen=conversation` 직접 진입 시 setup 화면 없이 대화 화면만
+  렌더 ②setup 화면에서 SW `message` 이벤트(`OPEN_CONVERSATION`) 수신 시 대화 화면으로 전환.
+- 영향받는 범위: `src/sw.ts`(`notificationclick`), `src/App.tsx`(`getInitialScreen()`,
+  `message` 리스너 추가).
+
 ### 2026-08-25 `beginListeningEngine()`에 `isSpeechInputSupported()` 가드 추가 — 부수 발견 버그 수정
 
 - 배경/문제: Happy Path 3번(자동 인사말) 구현 중 발견 — 인사말이든 일반 응답이든 TTS 재생이
