@@ -11,12 +11,19 @@
 
 ## 번들 크기 (코드 스플리팅 전/후)
 
+`App.tsx`에서 `ConversationScreen`을 `React.lazy(() => import('./ConversationScreen.tsx'))`로
+분리(`NotificationSetup` 진입 시 함께 로드되지 않도록). 측정: `npm run build` 산출물 기준.
+
 | 항목 | 전 | 후 |
 |---|---|---|
-| 초기 번들 크기 | | |
-| `ConversationScreen` 청크 분리 여부 | | |
+| 초기 번들 크기(`index-*.js`) | 207.92 kB (gzip 66.21 kB) | 196.21 kB (gzip 62.40 kB) |
+| `ConversationScreen` 청크 분리 여부 | 미분리(초기 번들에 포함) | 분리됨 — `ConversationScreen-*.js` 11.94 kB (gzip 4.63 kB), 대화 화면 진입 시에만 로드 |
 
-첨부: `rollup-plugin-visualizer` 트리맵 스크린샷 (전/후 각 1장)
+초기 번들에서 약 11.7 kB(gzip 3.8 kB)가 별도 청크로 빠져나갔다. `NotificationSetup`만 보는
+사용자(대화 화면에 진입하지 않는 경우)는 이 청크를 아예 내려받지 않는다.
+
+첨부: `rollup-plugin-visualizer` 트리맵 — `docs/deliverables/bundle-treemap-before.html`,
+`docs/deliverables/bundle-treemap-after.html` (전/후 각 1개, 브라우저로 열어서 확인)
 
 ## 체감 첫 상호작용 (TTI / 커스텀 계측)
 
