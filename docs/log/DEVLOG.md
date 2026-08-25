@@ -951,14 +951,56 @@
 
 ## Day 6 — 성능 & 접근성
 
-- 요청 내용:
+- 요청 내용: 2026-08-25 결정한 4시간 축소 스코프(`docs/log/DECISIONS.md` "Day 6~7 스코프 축소"
+  항목) 기준 3단계로 진행. (1) 코드 스플리팅 — `NotificationSetup` 진입 시 `ConversationScreen`이
+  같이 로드되지 않도록 `React.lazy` 분리, 분리 전/후 `rollup-plugin-visualizer` 번들 트리맵 캡처.
+  (2) 성능 계측 — `performance.mark()` 기반 TTI 유사 지표 + Lighthouse Performance/Accessibility
+  전/후 비교, 있는 그대로 정직하게 기록(과장 금지). (3) 접근성 점검(축소 버전) + 상태 갤러리
+  디버그 라우트(핵심 상태 위주로 축소).
 - 완료 사항:
-- DoD 체크: [ ] Lighthouse 전/후 [ ] 번들 트리맵 전/후 [ ] TTI 계측 전/후 [ ] 상태 갤러리 라우트 확인
+  1. **코드 스플리팅**(커밋 `e88d3e6`): `App.tsx`에서 `ConversationScreen`을
+     `lazy(() => import(...))` + `Suspense`로 분리. `rollup-plugin-visualizer` 신규 설치,
+     `vite.config.ts`에 배선. "전" 트리맵은 스플리팅 적용 **전에** 먼저 캡처해서
+     `docs/deliverables/bundle-treemap-before.html`로 보존(나중에 되돌릴 수 없다는 점을 고려해
+     순서를 지킴), "후"는 적용 뒤 `bundle-treemap-after.html`로 보존. 결과: 초기 번들
+     207.92 kB(gzip 66.21 kB) → 196.21 kB(gzip 62.40 kB), `ConversationScreen`이 11.94 kB
+     (gzip 4.63 kB) 별도 청크로 분리됨.
+  2. **성능 계측**(커밋 `4700278`): `NotificationSetup`의 마운트 `useEffect`에
+     `performance.mark()`/`measure()`로 "로드 시작(타임 오리진)~설정 화면 상호작용 가능 시점"을
+     계측. "전" 수치가 없다는 문제를 코드 스플리팅 커밋의 부모 커밋을 별도 `git worktree`로
+     체크아웃해 동일 계측 코드만 임시로(커밋 없이) 얹어 측정하는 방식으로 해결 — 현재 브랜치는
+     전혀 건드리지 않음. Playwright로 새 브라우저 컨텍스트를 7회씩 열어 측정, 이상치에 흔들리지
+     않도록 평균/최댓값이 아니라 **중앙값**을 대표값으로 사용(전 58.7ms vs 후 60.5ms — 오히려
+     후가 근소하게 큼, 노이즈 범위 내 사실상 동일). Lighthouse도 전/후 각 1회 측정
+     (`vite preview` 로컬 서빙) — Performance/Accessibility 둘 다 전/후 100/100. **정직한
+     결론**: 이 PoC는 앱이 원래 작아서 점수/체감 지표로는 개선을 증명하기 어렵고, 이번 코드
+     스플리팅의 실질 가치는 체감 속도가 아니라 "대화 화면 미진입 시 그 코드를 아예 안 받는다"는
+     전송 바이트 감소다 — 과장 없이 그대로 보고.
+  3. **상태 갤러리 + 접근성 점검**(커밋 `2c424be`): 개발 모드 전용 `?gallery=1` 라우트
+     (`src/GalleryRoot.tsx`, `src/components/StateGallery/StateGallery.tsx`)에 실제
+     상태머신 없이 6개 핵심 상태(`idle/empty`, `listening`, `streaming`, `assistant_speaking`,
+     `error`, `권한거부`)를 강제 렌더링 — `user_speaking`/`sending`은 찰나의 전이 상태라 축소
+     스코프에서 제외(근거는 `docs/log/DECISIONS.md`에 별도 기록). 접근성 점검: (a) 키보드만으로
+     마이크 경로/텍스트 폴백 경로 둘 다 완주 확인(`Tab`/`Enter`만, 키보드 트랩 없음), (b) 7개
+     상태의 `aria-live` 문구를 DOM에서 직접 확인해 전부 의도대로 동작함을 확인(사소한 발견
+     1건 — error 상태에서 안내가 살짝 중복되는데 낮은 우선순위로 판단해 사람 확인 후 수정 보류),
+     (c) `axe-core`(WCAG2A+AA)로 명도 대비 등 자동 검사 — 위반 0건.
+  4. 세 단계 모두 회귀 검증 반복 통과: `npx tsc -b`, `npm run lint`(기존 무해 경고 2건 유지,
+     신규 없음), `npm run build`, `verify:silence-timer`, `verify:claude-proxy`.
+- DoD 체크: **[x] Lighthouse 전/후 [x] 번들 트리맵 전/후 [x] TTI 계측 전/후 [x] 상태 갤러리
+  라우트 확인 → Day 6 DoD 4개 항목 전체 통과** (단, "상태 갤러리에서 전체 상태 확인"은 PRD
+  원문 7개가 아니라 2026-08-25 축소 스코프 결정에 따른 핵심 상태 6개 기준으로 판단).
 - 이슈/메모:
   - (성능 작업 착수 전 선행 수정) Vercel 배포본 실사용 테스트 중 "알림 클릭해도 대화 화면으로
     안 넘어감" 발견 → 원인은 새 버그가 아니라 Day 3 결정 항목에서 범위 밖으로 남겨뒀던
     SW↔페이지 메시징 미구현. 사람 확인 후 지금 구현(`src/sw.ts`, `src/App.tsx`) —
     자세한 내용은 `docs/log/DECISIONS.md` 2026-08-25 "SW↔페이지 메시징으로..." 항목 참고.
+  - Lighthouse/TTI 측정은 각각 1회/7회뿐이라 표본이 많지 않음 — 특히 Lighthouse는 로컬호스트
+    환경(네트워크 지연 없음)에서 1회만 쟀다는 한계를 정직하게 `PERFORMANCE_REPORT.md`에 남김.
+  - 상태 갤러리는 `ConversationScreen`의 레이아웃을 그대로 옮겨 적어 만든 것이라 레이아웃이
+    바뀌면 갤러리도 같이 갱신해야 하는 유지보수 부담이 있음(자동 동기화 장치 없음, 개발 전용
+    디버그 라우트라 감수).
+  - error 상태의 `aria-live` 중복 안내는 이번엔 수정하지 않고 그대로 둠(사람 확인 후 결정).
 
 ## Day 7 — 문서화 & 마무리
 
