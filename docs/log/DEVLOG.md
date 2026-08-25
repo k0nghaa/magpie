@@ -599,12 +599,254 @@
 
 ## Day 5 — TTS & 자동 사이클 완성
 
-- 요청 내용:
+- 요청 내용: (1) `SpeechOutputEngine`(Day 1 정의: `speak(text, onEnd)`)의 구현체
+  `WebSpeechSynthesisEngine`. (2) 상태머신에 `assistant_speaking` 추가:
+  `streaming → assistant_speaking → listening`, 기존 회귀 테스트(`verify:silence-timer`,
+  `verify:claude-proxy`) 무회귀 확인. (3) `assistant_speaking` 진입 시 마이크
+  `stop()`(mute) → TTS 재생 → `onEnd`에서 `start()` 재호출(마이크 재개, 새 세션 정상) — 마이크
+  pause/resume용 새 인터페이스 메서드는 추가하지 않고 기존 `stop()`/`start()` 재호출로만
+  구현(Day 1 인터페이스 시그니처 변경 없음, 사람이 미리 확정한 스코프). 시간 제한 조건: 반복
+  디버깅이 필요해지면 무리하지 말고 바로 상황 보고 후 PRD 11장 잘라낼 순서 2번(TTS 제거) 여부
+  상의하기로 함.
 - 완료 사항:
-- DoD 체크: [ ] Happy Path 3턴 이상 클릭 없이 자동 반복 완주
+  - `src/adapters/speech-output/WebSpeechSynthesisEngine.ts`(신규): Day 1 시그니처 그대로
+    구현. 재생 실패(`utterance.onerror`)도 `onEnd`로 처리(인터페이스에 `onError`가 없어 재생
+    사이클이 영원히 멈추지 않게 하기 위함). 인터페이스 밖에 `cancel()`을 추가해 수동
+    중지/언마운트 시 재생 중인 음성을 즉시 멈출 수 있게 함(`canceledByCaller` 플래그로 이
+    경우엔 `onEnd`를 다시 안 부름 — `WebSpeechInputEngine.stoppedByCaller`와 동일한 패턴).
+    `SpeechSynthesis.speak()`/`cancel()`/`SpeechSynthesisUtterance` 이벤트(`end`/`error`)와
+    `error` 사유(`canceled`/`interrupted` 등)는 MDN(`SpeechSynthesis.speak`,
+    `SpeechSynthesis.cancel`, `SpeechSynthesisUtterance`, `SpeechSynthesisErrorEvent.error`)
+    문서로 직접 확인 후 구현(추측 없음).
+  - `src/state-machine/types.ts`/`conversationReducer.ts`: `ConversationStatus`에
+    `assistant_speaking` 추가, `STREAM_DONE`의 목적지를 `listening`에서
+    `assistant_speaking`으로 변경, 새 이벤트 `ASSISTANT_SPEECH_DONE`(`assistant_speaking →
+    listening`) 추가. `assistant_speaking`에서 `INTERIM_RESULT`/`SILENCE_TIMEOUT`은 기존
+    가드 패턴 그대로 무시됨(불가능한 전이 차단).
+  - `src/state-machine/useConversationMachine.ts`: `start()`의 마이크 기동 로직을
+    `beginListeningEngine()`으로 추출(재사용을 위함). `playAssistantSpeech(text)` 신설 —
+    `engineRef.current?.stop()`으로 마이크를 먼저 끄고, 빈 응답이면 TTS 없이 바로
+    `beginListeningEngine()`, 아니면 `ttsEngineFactory()`로 TTS 엔진을 만들어 재생 후
+    `onEnd`에서 `ASSISTANT_SPEECH_DONE` 디스패치 + `beginListeningEngine()`(새 세션으로
+    마이크 재개). `cancelTtsPlayback()`을 `stop()`/언마운트 cleanup에도 배선해 재생 중인
+    TTS를 정리.
+  - `scripts/verify-silence-timer-logic.ts`: `streaming → assistant_speaking →
+    listening` 전이, `assistant_speaking`에서 `INTERIM_RESULT`/`SILENCE_TIMEOUT` 무시,
+    `ASSISTANT_SPEECH_DONE`이 다른 상태(listening/idle)에서 무시되는지까지 8개 케이스 추가
+    (총 26개) — 전부 PASS.
+  - `src/components/ConversationScreen/StreamingIndicator.tsx`,
+    `src/components/SpeechInputDemo/SpeechInputDemo.tsx`: `assistant_speaking` 상태 문구
+    ("AI가 말하는 중… (마이크 꺼짐)") 추가 — PRD 6장 "재생 중 마이크 mute + 시각 표시" 요구사항.
+  - **실제 브라우저 검증 중 발견한 문제와 해결**: 헤디드 Chrome + 실제 Claude API로 전체 사이클을
+    검증하다가, TTS 재생이 종종 끝나지 않고(`speechSynthesis.speaking=true`인 채로 아무 이벤트
+    없이 멈춤) 마이크가 영영 안 켜지는 문제를 발견했다. 원인 추적 결과 Chromium의 알려진 버그
+    (이슈 41294170/679437, "장문 재생 시 약 15초 후 멈춤")로 확인. 표준 우회법(주기적
+    `resume()` 호출)을 추가했으나 14초 간격으로는 이 환경에서 못 막았고, 격리 테스트에서는
+    5초 간격이 효과가 있었음(재현성 자체는 다소 불안정). 사람에게 있는 그대로 상황을 보고했고
+    (시간 제한 조건 충족), 사람이 "회화 앱인데 응답이 길고 스몰토크처럼 안 느껴진다"는 진짜
+    원인을 짚어줘 — 확인해보니 `claudeProxy.ts`/`api/claude-stream.ts`가 처음부터 `system`
+    필드를 지원했는데 Day 4까지 호출부가 한 번도 채워 보낸 적이 없어 Claude가 기본값대로 긴
+    목록형 답변을 하고 있었다. `useConversationMachine.ts`에 `SYSTEM_PROMPT`(1~3문장, 목록/
+    마크다운 금지, 짧은 되물음)를 추가해 `streamClaudeResponse`에 전달 — 부수적으로 서버의
+    프롬프트 캐싱 경로(`cache_control: ephemeral`)도 이때 처음 실제로 쓰이게 됨. 응답이 짧아진
+    뒤 재검증한 3턴 모두 TTS가 끝까지 재생되고 정상적으로 `listening`에 복귀함을 확인(아래).
+  - `npm run verify:silence-timer`(26개 케이스), `npm run verify:claude-proxy`(6개 시나리오),
+    `npx tsc -b`, `npm run lint`(기존과 동일한 무해 경고 2건, 신규 없음), `npm run build` 모두
+    통과.
+  - **실제 실행 검증(Playwright + 실제 로컬 API 서버 + 실제 Claude API + 실제 헤디드 Chrome,
+    마이크만 Day 3/4와 동일한 방식의 가짜 `SpeechRecognition`으로 재현, TTS는 실제 브라우저
+    `speechSynthesis` 그대로 사용)**: 3턴("안녕 오늘 기분 어때?" → "나는 오늘 날씨가 좋아서
+    기분 좋아" → "고마워 오늘 대화 즐거웠어")을 사용자 클릭 없이 자동으로 완주.
+    - 마이크 mute 확인: 각 턴마다 `assistant_speaking` 진입 시점에 정확히 `recognition.stop()`
+      호출 기록, TTS 종료 시점에 새 `SpeechRecognition` 인스턴스가 `constructed`+`start`되는
+      것을 타임라인으로 확인(인스턴스 누적 개수 1→2→3→4, 매 턴 새 세션).
+    - 실제 TTS 재생 확인: `window.speechSynthesis.speak()`가 실제 Claude 응답 텍스트로
+      호출되고, 실제 `utterance.onstart`가 발생(예: 66자 응답 → 202ms 뒤 시작, 11.7초 뒤
+      `utterance.onend`)한 뒤 정확히 `listening`으로 자동 복귀.
+    - 3턴 모두 위 사이클을 반복해 PRD Day 5 DoD("전체 Happy Path가 사용자 클릭 없이 자동으로
+      3턴 이상 반복 완주")를 충족.
+    - 페이지 에러(unhandled) 0건.
+- DoD 체크: **[x] Happy Path 3턴 이상 클릭 없이 자동 반복 완주 — 실제 Claude API + 실제
+  `speechSynthesis` + 가짜 마이크 입력으로 검증 완료.** (주의: 이 시점엔 아직
+  `ConversationScreen`/자동 인사말/수동 종료 버튼이 없어 `SpeechInputDemo`로 사이클 반복성만
+  확인한 것 — PRD가 말하는 "Happy Path **1→9 전체**" 최종 검증은 이 문서 뒷부분의 "Day 5 DoD
+  최종 검증(전체 Happy Path 1→9)" 항목 참고.)
 - 이슈/메모:
+  - **남아있는 리스크(정직하게 기록)**: Chromium 장문 재생 버그 자체는 완전히 해결되지 않았다
+    — 응답을 짧게 유도해 발생 확률을 낮췄고 `resume()` 워크어라운드도 넣어뒀지만, 우연히 아주
+    긴 응답이 나오면 여전히 재현될 수 있다. 이번 검증(3턴)은 표본이 적어, Day 6~7 데모 준비
+    중 더 다양한 대화(여러 번 주고받기)로 한 번 더 확인해보는 걸 권장.
+    - **자동화로 검증할 수 없는 것(Day 3~4와 동일한 환경 제약)**: 실제 음성으로 말했을 때 TTS
+      소리가 사람 귀에 자연스럽게 들리는지, 재생 중 실제 마이크에 대고 말했을 때 진짜로
+      에코가 안 잡히는지는 이 자동화 환경(오픈소스 Chromium 음성인식 인증키 부재)에서는
+      끝까지 증명 못 한다 — 로컬 Chrome + 실제 마이크로 사람이 직접 확인 필요.
+  - `unspokenPunctuation` 등 기존 이슈와 무관하게, 이번 system 프롬프트 추가로 응답 톤이
+    Day 4까지의 "설명형"에서 "대화형"으로 바뀌었다 — Day 4의 실제 실행 검증 로그(문서형 긴
+    답변 예시)와 비교하면 차이가 뚜렷하다.
 
-## 배포 인프라 사전 검증 — `api/claude-stream.ts` 실서비스 스트리밍 확인 (2026-08-25)
+### 후속 — `SpeechInputDemo` 제거, `ConversationScreen` 정식 조립 (2026-08-25)
+
+- 요청 내용: PRD 6장 컴포넌트 목록대로 `ConversationScreen`을 조립하고 임시 디버그
+  컴포넌트(`SpeechInputDemo`)를 제거. 이 화면에서 돋보여야 하는 건 음성 상호작용(자동
+  턴테이킹, TTS)이지 채팅 UI 비주얼이 아니므로, `ChatMessageList`/`ChatBubble`은 색/정렬
+  구분만, `TurnIndicator`는 텍스트+`aria-live`만 하고 그 이상(그림자·애니메이션·아이콘 등)은
+  만들지 말 것. 기존 `ResumeSpeakingButton`/`TextInputFallback`/`StreamingIndicator`/
+  `ErrorBanner`/`EmptyState`는 스타일 변경 없이 재배치만.
+- 완료 사항:
+  - `src/components/ConversationScreen/ChatBubble.tsx`(신규): user/assistant를 배경색+정렬로만
+    구분(요청대로 그 이상 스타일링 없음).
+  - `src/components/ConversationScreen/ChatMessageList.tsx`(신규): 완결된 과거 턴 목록 +
+    진행 중인 턴(사용자 interim 텍스트 / AI 스트리밍 텍스트)을 마지막 말풍선으로 함께 렌더링.
+  - `src/components/ConversationScreen/TurnIndicator.tsx`(신규): 상태별 문구 + `aria-live`만.
+  - `src/state-machine/useConversationMachine.ts`: 화면 표시용 `messages` state 신설(기존
+    비용 통제용 `historyRef`를 그대로 미러링하되 윈도잉 없이 세션 전체를 보여줌). `stop()`
+    (대화 종료)에서 `historyRef`/`messages`를 함께 비움.
+  - `src/components/ConversationScreen/ConversationScreen.tsx`(신규): 위 컴포넌트 + 기존
+    `ResumeSpeakingButton`/`TextInputFallback`/`StreamingIndicator`/`ErrorBanner`/`EmptyState`를
+    조립. 버튼 문구를 디버그용("마이크 테스트 시작"/"중지 초기화")에서 실제 화면용("대화
+    시작"/"대화 종료")으로 변경.
+  - `src/App.tsx`: `SpeechInputDemo` 대신 `ConversationScreen` 렌더링.
+  - `src/components/SpeechInputDemo/`(디렉터리 전체 삭제).
+  - `npm run verify:silence-timer`(26개), `npm run verify:claude-proxy`(6개), `npx tsc -b`,
+    `npm run lint`(기존과 동일한 무해 경고 2건, 신규 없음), `npm run build` 모두 통과.
+  - **실제 실행 검증(Playwright, 실제 로컬 API 서버 + 실제 Claude API + 실제 헤디드 Chrome,
+    마이크만 가짜 `SpeechRecognition`)**: `SpeechInputDemo` 잔재 없음 확인 → "대화 시작" 클릭
+    시 `listening` 전환 → 가짜 발화로 `user_speaking` 전환 + 실시간 유저 말풍선 노출 확인 →
+    무음 → `sending → streaming → assistant_speaking → listening` 전체 사이클을 실제 Claude
+    응답으로 완주, 완결된 말풍선 2개(user: "안녕 테스트야" / assistant: 실제 Claude 응답) 노출
+    확인 → "대화 종료" 클릭 시 `EmptyState` 재노출 + 말풍선 리스트 초기화 확인. 페이지 에러
+    0건.
+- DoD 체크: 해당 없음(Day 5 정식 DoD는 이전 항목에서 이미 통과 — 이번은 PRD 6장 컴포넌트
+  목록을 채우는 후속 작업).
+- 이슈/메모: 없음.
+
+### 후속 — PRD 4장 Happy Path 3번(자동 인사말)/9번(수동 종료) 구현 (2026-08-25)
+
+- 요청 내용: (1) `ConversationScreen` 진입 즉시 사용자 입력 없이 AI가 먼저 인사말+질문을
+  자동 출력 — 이번엔 실시간 LLM 생성이 아니라 고정 문구 중 무작위 선택(속도/재현성 우선,
+  사람 확인 완료). 이 첫 메시지도 대화 히스토리(윈도잉 3턴)에 정상 반영되어야 함. (2) 수동
+  종료 버튼 — 종료 후 이동 위치는 PRD에 명시가 없어 임의로 정하지 않고 확인.
+- **사람 확인 후 결정한 것**(트레이드오프 설명 후 확인받음, 근거는 `docs/log/DECISIONS.md`
+  2026-08-25 항목들 참고):
+  1. 종료 후 이동: App.tsx에 `screen: 'setup' | 'conversation'` 전환 상태를 신설해 설정
+     화면으로 복귀. 지금까지 두 화면을 항상 같이 렌더링하던 임시 구조를 실제 화면 전환으로
+     교체 — `NotificationSetup`의 "지금 시작하기"(Day 2 placeholder)도 이번에 실제 연결.
+- 완료 사항:
+  - `src/state-machine/types.ts`/`conversationReducer.ts`: `GREETING_STARTED` 이벤트 추가
+    (`idle → assistant_speaking`, `assistantText`에 인사말 반영). `STREAM_DONE`과 동일한
+    목적지로 보내 이후 흐름(TTS 재생 → `ASSISTANT_SPEECH_DONE` → listening, 마이크 자동 활성화)
+    을 그대로 재사용.
+  - `src/state-machine/useConversationMachine.ts`: `FIXED_GREETINGS`(5개 고정 문구) + `greet()`
+    신설 — historyRef/messages에 먼저 반영(다음 턴 API 호출 문맥 포함) → `GREETING_STARTED`
+    디스패치 → 기존 `playAssistantSpeech()` 재사용(마이크 mute 없음-상태이므로 no-op, TTS
+    재생, 종료 후 마이크 자동 시작). `hasGreetedRef`로 세션당 1회만 실행되게 가드.
+  - `src/components/ConversationScreen/ConversationScreen.tsx`: 마운트 시 `greet()` 자동
+    호출, `onEnd` prop 신설(종료 시 `stop()` + `onEnd()` 호출). "대화 종료" 버튼은 상태와
+    무관하게 항상 활성화로 변경(화면을 나가는 버튼이 됐으므로, 사람 확인 없이 결정한 낮은
+    리스크 판단).
+  - `src/components/NotificationSetup/NotificationSetup.tsx`: placeholder 문구
+    (`START_NOW_PLACEHOLDER`) 제거, "지금 시작하기" 클릭 시 새 `onStartConversation` prop 호출.
+  - `src/App.tsx`: `screen` state 신설, `setup`/`conversation` 중 하나만 렌더링.
+  - `scripts/verify-silence-timer-logic.ts`: `GREETING_STARTED` 관련 3개 케이스 추가(idle에서
+    반영, `ASSISTANT_SPEECH_DONE`으로 listening 복귀, idle이 아닌 상태에서 무시) — 총 29개 케이스
+    전부 PASS.
+  - **실제 브라우저 검증 중 발견해 함께 고친 버그 2건(둘 다 사람 확인 없이 결정, 낮은 리스크,
+    `docs/log/DECISIONS.md` 참고)**:
+    1. React 18 StrictMode(개발 모드)가 마운트 effect를 "실행 → 즉시 가짜 cleanup → 재실행"으로
+       두 번 도는데, `greet()`를 effect 안에서 동기 호출하면 TTS가 막 시작된 직후 그 가짜
+       cleanup이 `cancelTtsPlayback()`을 실행해 재생을 `interrupted` 에러로 끊어버리고, 이후
+       `hasGreetedRef` 가드 때문에 재시도도 안 돼 화면이 `assistant_speaking`에 영원히 멈추는
+       버그를 실제로 재현·확인. `useEffect` 안에서 `setTimeout(() => greet(), 0)` + cleanup에서
+       `clearTimeout`으로 한 틱 미뤄 해결 — 가짜 cleanup이 예약된 타이머를 취소시키고, "진짜"
+       두 번째 마운트에서 예약된 타이머만 살아남아 정확히 한 번 실행된다.
+    2. `beginListeningEngine()`이 음성 미지원 여부를 확인하지 않아, 텍스트 폴백 모드에서도 TTS가
+       끝날 때마다 마이크 엔진을 시작하려다 `unsupported` 에러로 `error` 상태에 튕기는 잠재
+       버그가 Day 5부터 있었음(Day 5 검증은 가짜 `SpeechRecognition`으로 "지원함"을 재현해서
+       이 경로를 안 건드려 못 잡음) — `isSpeechInputSupported()` 가드 추가로 수정.
+    3. **디자인 버그(사람 확인 없이 수정)**: `assistant_speaking` 상태에서 "실시간 말풍선"
+       (`liveAssistantText`)이 이미 `messages`에 반영된 같은 응답을 한 번 더 그려 말풍선이
+       중복 노출되고 있었다 — Day 5 검증 땐 이 구간을 지나쳐서(듣기 상태 도달 후에만 확인)
+       못 잡았던 것. `assistant_speaking`을 `liveAssistantText` 조건에서 제외해 해결
+       (`streaming`에서만 실시간 표시, `assistant_speaking` 진입 시점엔 이미 `messages`가
+       최종본을 갖고 있음).
+  - `npm run verify:silence-timer`(29개), `npm run verify:claude-proxy`(6개), `npx tsc -b`,
+    `npm run lint`(기존과 동일한 무해 경고 2건, 신규 없음), `npm run build` 모두 통과.
+  - **실제 실행 검증(Playwright, `--deny-permission-prompts`로 알림 권한 거부 재현 + 실제
+    로컬 API 서버 + 실제 Claude API + 실제 헤디드 Chrome, 마이크만 가짜 `SpeechRecognition`)**:
+    1. 초기 진입 시 설정 화면(`NotificationSetup`)만 보임 → 알림 권한 요청 클릭 → 실제 거부
+       재현 → "지금 시작하기" 노출 → 클릭 시 대화 화면으로 전환(설정 화면 텍스트는 사라짐).
+    2. 대화 화면 진입 직후 사용자 조작 없이 곧바로 `assistant_speaking`(마이크 꺼짐)으로
+       시작, 실제 `speechSynthesis.speak()`가 고정 인사말로 호출되고 실제 `start`/`end`
+       이벤트까지 발생(4.7초 후 재생 완료) → 자동으로 `listening` 전환 + 마이크 자동 시작
+       (Happy Path 3~4번) 확인. 인사말 말풍선 1개만 노출(중복 없음).
+    3. 가짜 발화 주입 → 실제 Claude 응답까지 정상 완주, 두 번째 AI 응답이 "방금 네가 먼저
+       인사해줬지"라는 사용자 말에 "아, 맞다!"로 반응 — 고정 인사말이 실제로 히스토리
+       윈도잉에 포함되어 다음 턴 문맥으로 전달됐음을 응답 내용으로 확인. 최종 말풍선 3개
+       (인사말/사용자/AI 응답) 정확히 노출.
+    4. "대화 종료" 클릭 → 설정 화면으로 복귀 확인(대화 화면 텍스트 사라짐, Happy Path 9번).
+    5. 재진입("지금 시작하기" 재클릭) → 이전 대화 내역 없이 새로운 무작위 인사말 1개로 다시
+       시작함을 확인(재마운트마다 새 세션).
+    페이지 에러 0건.
+- DoD 체크: 해당 없음(Day N 정식 DoD 항목은 아니고 PRD 4장 Happy Path 3/9번을 채우는 후속
+  작업). **PRD 4장 Happy Path 3번·9번 모두 실제 실행으로 확인 완료.**
+- 이슈/메모:
+  - 실제 브라우저 알림(OS 알림) 클릭 시 이 화면 전환 상태로 연결하는 것은 이번 범위 밖 —
+    Service Worker↔페이지 메시징이 추가로 필요해 `src/sw.ts`의 `notificationclick`은 여전히
+    루트만 연다(기존에도 알려진 제한, Day 7 전까지 필요시 확인).
+  - 고정 인사말 방식은 이번 스프린트 한정 스코프 — 추후 매번 LLM에게 실시간으로 인사말/질문을
+    생성하도록 전환 예정(`docs/log/DECISIONS.md` 참고, `GREETING_STARTED` 이벤트는 그대로
+    재사용 가능하도록 설계해둠).
+
+### 후속 — Day 5 DoD 최종 검증: 전체 Happy Path 1→9 (TTS 포함, 2026-08-25)
+
+- 요청 내용: Day 5 DoD "전체 Happy Path(1→9)가 사용자 클릭 없이 자동으로 3턴 이상 반복
+  완주"를 지금까지 조립된 실제 화면(`ConversationScreen` + 자동 인사말 + TTS + 수동 종료
+  버튼)을 다 합쳐서 최종 검증. TTS는 이번 스프린트에서 컷하지 않고 그대로 포함해서 검증(PRD
+  11장 잘라낼 순서 2번은 발동하지 않음). 자동화 가능한 부분과 실기기가 필요한 부분을 Day 3~4
+  처럼 정직하게 구분하고, 최소 3턴이 사람 개입 없이 이어지는지 확인.
+- **TTS 진행 결과**: 포함 유지. Day 5 본 작업에서 Chromium 장문 재생 정지 버그를 겪었지만
+  `resume()` 워크어라운드 + system 프롬프트로 응답을 짧게 유도해 해결했고(위 항목들 참고),
+  이후 "TTS 재생/마이크 자동 mute·재시작 흐름 자연스러움 재점검"(같은 날 후속)에서 `lang`
+  지정·`resume()` 가드까지 추가로 다듬었다. **PRD 11장 잘라낼 순서 2번(TTS 제거)은 발동한 적
+  없음** — TTS는 Day 5 최종 산출물에 그대로 살아있다.
+- 검증 방법: 실제 로컬 API 서버(`dev-api-server.ts`, 실제 Anthropic API 키) + 실제 Vite dev
+  서버 + 실제 헤디드 Chrome의 진짜 `speechSynthesis`. 마이크만 Day 3~5와 동일한 방식의 가짜
+  `SpeechRecognition`(실제 브라우저 이벤트 계약과 동일한 모양)으로 재현 — 자동화로는 여기까지가
+  한계라는 걸 Day 3에서 이미 확인했음(오픈소스 Chromium에 Google 정식 음성인식 인증키 없음).
+- 완료 사항(Playwright 자동화 실행 결과, 전 과정 사용자 클릭 없이 자동 진행 — 클릭은 진입 시
+  "지금 시작하기" 1회와 마지막 "대화 종료" 1회뿐):
+  1. **Happy Path 1~2**(설정 화면, 알림)는 Day 2에서 이미 검증됨 — 이번엔 알림 권한 거부 재현
+     → "지금 시작하기" 노출까지만 재확인.
+  2. **Happy Path 3~4**(자동 인사말 + TTS + 마이크 자동 활성화)": "지금 시작하기" 클릭 직후
+     추가 클릭 없이 곧바로 `assistant_speaking`(마이크 꺼짐) 진입 확인 → TTS 재생 종료 후
+     자동으로 `listening` 전환 확인.
+  3. **Happy Path 5~8**(발화→무음→스트리밍→TTS→재청취) 사이클을 **4턴 연속**(최소 요구 3턴을
+     초과) 자동 반복: 매 턴 `user_speaking` → `streaming`/`assistant_speaking` → `listening`
+     전환을 전부 확인, 4턴 전부 성공(중간에 끊긴 턴 없음).
+  4. 대화 히스토리(`ChatMessageList`)에 인사말 1개 + 사용자/AI 4턴(8개) = 총 9개 말풍선이
+     정확히 쌓임을 확인 — AI 응답 내용도 이전 턴을 실제로 참조("충분한 수면이 정말 다르긴
+     해요", "산책하면서 머리도 맑아지고" 등)해 히스토리 윈도잉이 매 턴 정상 동작함을 재확인.
+  5. **Happy Path 9**(수동 종료): "대화 종료" 클릭 → 설정 화면(`NotificationSetup`)으로 정상
+     복귀.
+  6. TTS 재생 5회(인사말 1 + 응답 4) 전부 `speak()`→`start()`→`end()` 정상 완주, TTS 에러 0건,
+     페이지/콘솔 에러 0건.
+  7. `npm run verify:silence-timer`(29개), `npm run verify:claude-proxy`(6개), `npx tsc -b`,
+     `npm run lint`(기존과 동일한 무해 경고 2건, 신규 없음) 모두 사전 확인 후 진행.
+- **자동화로 검증한 것 vs 사람이 확인해야 하는 것(정직하게 구분, Day 3~4와 동일한 원칙)**:
+  - 자동화로 검증: 상태머신이 브라우저 이벤트 계약에 정확히 반응하는지(마이크 mute/재시작
+    타이밍, TTS 재생 성공, 히스토리 누적, 화면 전환), 실제 Claude API 왕복이 4턴 연속 끊김
+    없이 이어지는지, 페이지 레벨 에러가 없는지 — 이 모든 게 **결정론적으로 재현 가능한
+    증거**로 확인됨.
+  - 사람이 실기기로 확인해야 하는 것(자동화 환경의 근본 한계, 이번에도 동일): 진짜 사람 음성을
+    마이크로 인식하는 품질/타이밍 체감, TTS 소리가 실제로 자연스럽게 들리는지, 재생 중 실제
+    마이크에 대고 말했을 때 진짜로 에코가 안 잡히는지. 자동화가 증명하는 건 "코드가 브라우저
+    API 계약대로 정확히 동작한다"는 것이지 "사람이 들었을 때 자연스럽다"는 것이 아니다.
+- DoD 체크: **[x] 전체 Happy Path(1→9)가 사용자 클릭 없이 자동으로 3턴 이상(4턴) 반복
+  완주 — TTS 포함, 실제 Claude API + 실제 `speechSynthesis`로 확인 완료. Day 5 DoD 최종
+  통과.**
+- 이슈/메모:
+  - 실기기(로컬 Chrome + 실제 마이크)로 3~4턴 이상 대화해보며 최종 확인하는 걸 Day 6~7 데모
+    준비 전 한 번 더 권장 — 이번 자동화 검증의 표본(4턴, 1회 실행)이 아주 많지는 않음.
 
 - 요청 내용: Day 6~7 본작업 전에, `api/claude-stream.ts`를 실제 Vercel에 배포했을 때도 로컬과
   동일하게 진짜 스트리밍(청크 단위 시간차 도착)이 되는지만 선행 확인. 전체 프론트엔드 배포·
@@ -656,6 +898,56 @@
     `vercel deploy`하는 방식만 검증됨).
   - 이번 배포는 API 함수 하나의 스트리밍 동작 확인이 목적이라 프론트엔드 정식 배포용 설정
     (커스텀 도메인, GitHub 연동을 통한 자동 배포 등)은 다루지 않음 — Day 7 최종 정리 때 필요.
+
+## 음성 상호작용 자연스러움 폴리싱 — TTS 재생/마이크 자동 mute·재시작 흐름 재점검 (2026-08-25)
+
+- 요청 내용: 이 프로젝트에서 돋보여야 할 건 텍스트 UI가 아니라 음성 상호작용의 자연스러움 —
+  ① 스트리밍 종료 후 TTS 시작까지 부자연스러운 텀이 있는지, ② 재생 중 문장이 끊기는 느낌이
+  있는지, ③ TTS 종료 후 듣기 상태 전환이 바로 되는지 아니면 어색한 텀이 있는지 실제 브라우저에서
+  3~4턴 이상 반복 재생해보며 점검하고, 문제가 있으면 원인을 찾아 고칠 것. 상태머신 구조 변경/
+  새 인터페이스가 필요할 정도로 커지면 먼저 알리기로 함.
+- 점검 방법: 실제 로컬 API 서버 + 실제 Claude API + 실제 헤디드 Chrome의 진짜
+  `speechSynthesis`(마이크만 가짜 `SpeechRecognition`)로 인사말 포함 5턴을 연속 실행하며,
+  `speechSynthesis.speak()`/`utterance.boundary`/`utterance.end`/마이크 `start()`/`stop()`을
+  `performance.now()`와 함께 계측하는 정밀 타임라인을 수집(Day 4의 MutationObserver 타임라인과
+  같은 취지, 더 세분화됨).
+- 완료 사항(실측 결과 요약):
+  1. **①스트리밍 종료→TTS 시작**: `STREAM_DONE`/`GREETING_STARTED` 디스패치와 `speak()` 호출이
+     같은 동기 흐름 안에 있어 코드 레벨 지연은 0ms. 실측 로그: `mic:stop`(마이크 mute 시점)
+     →다음 `speak-called`까지 5턴 모두 정확히 0ms.
+  2. **②재생 중 끊김**: `utterance.boundary` 이벤트 간격이 어절 길이에 따라 자연스럽게
+     300~1400ms 사이를 오가며 고르게 이어짐 — 이상 정지·재시작·에러 신호 없음. 5턴(최장 발화
+     10.57초) 전부 `onerror` 0건.
+  3. **③TTS 종료→마이크 재개**: `utterance.end`와 마이크 `start()`의 실측 간격이 5턴 모두
+     0~1ms — `ASSISTANT_SPEECH_DONE` 디스패치 후 `beginListeningEngine()`이 같은 동기 흐름에서
+     바로 실행되기 때문.
+  4. 다만 **세션 첫 발화(인사말)에서만** `speak()` 호출~실제 재생 시작 사이에 16~91ms 수준의
+     콜드스타트가 있음을 확인(이후 턴은 16~22ms로 더 줄어듦). `speechSynthesis.getVoices()`를
+     모듈 로드 시점에 미리 호출해 "예열"하면 줄어들지 시도해봤으나, 이 환경은 `getVoices()`가
+     항상 빈 배열을 반환해 실측상 개선 효과가 없어(91ms ≈ 기존과 동일 수준) 되돌림 — 효과
+     없는 코드를 "고쳤다"고 남겨두지 않기 위함. 100ms 미만·1회성이라 사람이 체감하기 어려운
+     수준으로 판단, 더 파고들지 않기로 함.
+  5. **실제로 적용한 개선 2가지**(둘 다 사람 확인 없이 결정, 낮은 리스크):
+     - `SpeechSynthesisUtterance.lang = 'ko-KR'` 명시 — 기존엔 빈 문자열로 방치돼 있었음(MDN
+       권장: 발음/음성 선택 정확도를 위해 lang을 지정할 것). 이 환경은 `getVoices()`가 항상
+       비어 JS에서 특정 보이스를 고를 순 없지만, lang 힌트 자체는 그대로 엔진에 전달된다.
+     - Chromium 장문 재생 버그 우회용 `resume()` 워크어라운드(Day 5)를 `speechSynthesis.paused`
+       일 때만 호출하도록 가드(`resumeIfPaused`) — 재생 중 호출도 MDN상 안전한 조건부 동작이고
+       실측(6~10.5초 재생 중 최소 1회 이상 호출됨)으로도 이상 없었지만, 불필요한 호출을 남길
+       이유가 없어 방어적으로 정리.
+  - `npx tsc -b`, `npm run lint`(기존과 동일한 무해 경고 2건, 신규 없음), `npm run verify:silence-timer`,
+    `npm run verify:claude-proxy`, `npm run build` 모두 통과.
+- DoD 체크: 해당 없음(Day N 정식 DoD 항목이 아니라 기존 구현의 품질 재점검).
+- 이슈/메모:
+  - **자동화로 검증할 수 없는 것(정직하게 기록, Day 3~5와 동일한 한계)**: 실제 사람 귀로 듣는
+    음질/자연스러움 자체와, 진짜 마이크가 물리적으로 재활성화되는 실제 지연(테스트는 가짜
+    `SpeechRecognition`이라 `start()` 호출이 즉시 응답 — 실제 OS 오디오 캡처 재시작 시간은
+    측정 불가)은 이 환경에서 증명하지 못한다. 코드 레벨 지연이 전부 0ms에 가깝다는 점,
+    Chromium 버그(15초 정지) 재현이 5턴 내내 없었다는 점은 "기술적으로 매끄럽다"는 근거이지
+    "사람이 들었을 때 자연스럽다"는 근거는 아니다 — 사람이 로컬 Chrome + 실제 마이크로 3~4턴
+    직접 들어보고 확인하는 걸 권장.
+  - 상태머신 구조 변경이나 새 인터페이스 추가는 필요하지 않았음(사전에 약속한 에스컬레이션
+    조건 발동 안 함).
 
 ## Day 6 — 성능 & 접근성
 

@@ -5,7 +5,6 @@ import { showBrowserNotification } from '../../adapters/reminder/showBrowserNoti
 const STORAGE_KEY = 'magpie:notification-time'
 const DEFAULT_TIME = '09:00'
 const REMINDER_TITLE = '오늘의 회화, 준비되셨나요?'
-const START_NOW_PLACEHOLDER = '대화 화면은 아직 준비 중입니다 (Day 3에서 연결 예정)'
 
 type PermissionState = NotificationPermission | 'unsupported'
 
@@ -28,10 +27,16 @@ function getNextOccurrence(hhmm: string): Date {
   return next
 }
 
-function NotificationSetup() {
+interface NotificationSetupProps {
+  // "지금 시작하기"(권한 거부/미지원 시 대체 진입로) 클릭 시 호출 — ConversationScreen이 없던
+  // 시절엔 준비 중 안내 문구만 띄웠지만(placeholder), 이제 실제 화면이 생겨 App.tsx의 화면
+  // 전환 상태로 연결한다(docs/log/DECISIONS.md 참고).
+  onStartConversation: () => void
+}
+
+function NotificationSetup({ onStartConversation }: NotificationSetupProps) {
   const [time, setTime] = useState(getInitialTime)
   const [permission, setPermission] = useState<PermissionState>(getCurrentPermission)
-  const [startNowMessage, setStartNowMessage] = useState<string | null>(null)
   const engineRef = useRef<BrowserNotificationEngine | null>(null)
   if (engineRef.current === null) {
     engineRef.current = new BrowserNotificationEngine()
@@ -71,10 +76,6 @@ function NotificationSetup() {
     // requestPermission()은 사용자 클릭(제스처) 핸들러 안에서 호출해야 브라우저가 프롬프트를 띄운다.
     const result = await Notification.requestPermission()
     setPermission(result)
-  }
-
-  function handleStartNow() {
-    setStartNowMessage(START_NOW_PLACEHOLDER)
   }
 
   const isUnsupported = permission === 'unsupported'
@@ -121,16 +122,13 @@ function NotificationSetup() {
         )}
 
         {isBlocked && (
-          <div className="flex flex-col gap-2">
-            <button
-              type="button"
-              onClick={handleStartNow}
-              className="rounded-md border border-neutral-900 px-4 py-2 text-neutral-900"
-            >
-              지금 시작하기
-            </button>
-            {startNowMessage && <p aria-live="polite" className="text-sm text-neutral-500">{startNowMessage}</p>}
-          </div>
+          <button
+            type="button"
+            onClick={onStartConversation}
+            className="rounded-md border border-neutral-900 px-4 py-2 text-neutral-900"
+          >
+            지금 시작하기
+          </button>
         )}
       </div>
     </section>

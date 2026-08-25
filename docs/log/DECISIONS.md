@@ -283,3 +283,156 @@
   상태가 되면, 리듀서가 `error` 상태에서의 `TEXT_SUBMITTED`를 무시하도록 되어 있어(불가능한
   전이 차단 규칙) 사용자가 다시 입력해도 아무 반응이 없었다 — 복구 수단이 전무했던 잠재
   버그. `ErrorBanner`의 재시도 버튼이 `stop()`으로 idle로 되돌려 이 경로를 함께 복구함.
+
+### 2026-08-25 Day 5: `assistant_speaking` 상태 추가 (Day 4 결정 뒤집음)
+
+- 배경/문제: Day 4에서 "TTS 어댑터가 없어 `assistant_speaking`을 이번엔 제외"로 결정했었는데
+  (위 2026-08-25 Day 4 항목), Day 5에서 `WebSpeechSynthesisEngine`이 생겨 그 전제가 사라졌다.
+- 결정: `streaming --STREAM_DONE--> assistant_speaking --ASSISTANT_SPEECH_DONE--> listening`으로
+  확장. `STREAM_DONE`의 목적지를 `listening`에서 `assistant_speaking`으로 바꾸고, 새 이벤트
+  `ASSISTANT_SPEECH_DONE`을 추가.
+- 이유: PRD 6장 원안 그대로. Day 4 결정문의 "아직 안 생긴 어댑터를 위해 상태만 미리 만들지
+  않는다"는 원칙과 정확히 반대 상황(이제 어댑터가 생겼다)이라 자연스럽게 뒤집힘.
+- 영향받는 범위: `src/state-machine/types.ts`, `conversationReducer.ts`,
+  `scripts/verify-silence-timer-logic.ts`(회귀 케이스 추가).
+
+### 2026-08-25 Day 5: 마이크 mute를 새 인터페이스 메서드 없이 기존 `stop()`/`start()` 재호출로 구현
+
+- 배경/문제: TTS 재생 중 마이크가 자기 음성을 인식하는 에코를 막아야 한다(PRD 4장). 일반적인
+  구현은 `SpeechInputEngine`에 `pause()`/`resume()` 메서드를 추가하는 것이지만, 사람이 먼저
+  "Day 1 인터페이스 시그니처 변경 없이, 기존 `stop()`/`start()` 재호출만으로 하라"고 스코프를
+  확정해서 시작함(대안 검토 없이 확정 지시).
+- 결정: `assistant_speaking` 진입 시 `engineRef.current?.stop()` → TTS 재생 → `onEnd`에서
+  `engineFactory()`로 **새 엔진 인스턴스**를 만들어 `start()` — 직전 continuous 세션을 이어받지
+  않고 항상 새 세션으로 마이크가 재개된다.
+- 이유: 사람이 이미 확정한 스코프. 부수 효과(새 세션이라 `transcript`도 함께 초기화됨)는
+  다음 사용자 턴이 시작되는 시점이라 문제 없다고 판단.
+- 영향받는 범위: `src/state-machine/useConversationMachine.ts`(`beginListeningEngine`,
+  `playAssistantSpeech`).
+
+### 2026-08-25 Day 5: `WebSpeechSynthesisEngine`에 인터페이스 밖 `cancel()` 메서드 추가 (사람 확인 없이 결정)
+
+- 배경/문제: 수동 "중지/초기화" 버튼을 누르거나 언마운트될 때, TTS가 재생 중이면 즉시 멈춰야
+  한다. 그런데 Day 1 `SpeechOutputEngine` 인터페이스엔 `speak(text, onEnd)`만 있고 취소 메서드가
+  없다 — 인터페이스를 확장할지, 인터페이스 밖의 구현체 전용 메서드로 둘지 선택 필요.
+- 검토한 대안: (A) `SpeechOutputEngine` 인터페이스에 `cancel()`을 추가(mock 구현체도 전부 이
+  메서드를 가져야 함). (B) `WebSpeechSynthesisEngine` 클래스에만 `cancel()`을 추가하고,
+  호출부는 `(engine as SpeechOutputEngine & { cancel?(): void })`로 옵셔널하게만 호출.
+- 결정: (B).
+- 이유: 사람 확인 없이 결정(낮은 리스크, 되돌리기 쉬움) — 이번 작업 지시 자체가 "Day 1 인터페이스
+  시그니처 변경 없음"이었고, `cancel()`은 재생 중 취소라는 부가 기능이라 인터페이스 계약(모든
+  구현체가 지켜야 할 최소 계약)에 넣을 필요가 없다고 판단. 옵셔널 체이닝으로 구현체가 없으면
+  조용히 넘어가 mock 구현체에 부담을 주지 않는다.
+- 영향받는 범위: `src/adapters/speech-output/WebSpeechSynthesisEngine.ts`(`cancel()`),
+  `src/state-machine/useConversationMachine.ts`(`cancelTtsPlayback()`).
+
+### 2026-08-25 Day 5: LLM에 system 프롬프트 추가 (스몰토크 스타일 강제) — 사람 지시로 결정
+
+- 배경/문제: Day 5 실제 브라우저 검증 중, TTS 재생이 종종 끝나지 않고 멈추는 문제를 발견했다.
+  원인을 추적해보니 Chromium의 알려진 버그(이슈 41294170/679437, "약 15초 후 장문 재생이
+  아무 이벤트 없이 멈춤")였고, 표준 우회법(주기적 `resume()` 호출)을 적용해도 이 환경에서는
+  간헐적으로만 효과가 있었다. 근본 원인을 더 파보니 애초에 `claudeProxy.ts`/`api/claude-stream.ts`
+  둘 다 `system` 필드를 이미 지원하는데 호출부(`useConversationMachine.ts`)가 한 번도 채워
+  보낸 적이 없어서, Claude가 기본값대로 목록·마크다운 위주의 긴 "문서형" 답변을 하고 있었다.
+  사람에게 상황을 그대로 보고했더니 "회화 앱인데 응답이 길고 회화처럼 안 느껴진다, 스몰토크
+  위주로 짧게 갔으면 좋겠다"는 지시를 받음.
+- 결정: `SYSTEM_PROMPT` 상수(1~3문장, 목록/마크다운 금지, 실시간 정보 모름을 짧게 인정, 가끔
+  되물음)를 만들어 `streamClaudeResponse` 호출 시 `system`으로 전달.
+- 이유: 사람 지시. PRD 1장의 핵심 루프("아침 10분 스몰토크")와도 정확히 일치하고, 응답이
+  짧아지면 TTS 재생 시간도 줄어 위 Chromium 버그를 실질적으로 덜 건드리게 되는 부수 효과도
+  확인(실제 재검증: 66자/53자/42자 응답 3턴 모두 TTS 끝까지 재생 후 정상적으로 `listening`
+  복귀). 다만 이 버그 자체가 완전히 해결된 것은 아니고(짧아서 안 걸릴 확률이 낮아졌을 뿐),
+  아주 긴 응답이 우연히 나오면 여전히 재현될 수 있다는 점은 남아있는 리스크로 기록.
+- 영향받는 범위: `src/state-machine/useConversationMachine.ts`(`SYSTEM_PROMPT`,
+  `runSendCycle`의 `streamClaudeResponse` 호출). 부수 효과: 지금까지 미사용이었던 서버의
+  프롬프트 캐싱 경로(`api/claude-stream.ts`의 `cache_control: ephemeral`)가 이번에 처음으로
+  실제 사용됨(CLAUDE.md 8장 비용 통제 원칙 2번).
+
+### 2026-08-25 PRD 4장 Happy Path 3번: 첫 인사말을 고정 문구로 (LLM 실시간 생성은 추후 전환)
+
+- 배경/문제: PRD 4장 Happy Path 3번은 "대화 화면 진입, 인사말과 첫 질문이 스트리밍 텍스트 +
+  TTS 음성으로 자동 출력된다"고만 되어 있고, 이 첫 메시지를 매번 LLM에 실시간으로 생성시킬지,
+  고정된 문구 풀에서 고를지는 명시돼 있지 않다.
+- 검토한 대안: (A) 화면 진입 시마다 LLM에 "인사말+질문 하나 만들어줘" 요청을 보내 실시간
+  생성. (B) 미리 준비한 고정 문구 몇 개 중 하나를 무작위로 선택.
+- 결정: (B), **이번 스프린트 한정 스코프**. 이번 스프린트 이후(PoC 범위 밖) 매번 LLM에게
+  실시간으로 인사말/질문을 생성하도록 전환할 예정.
+- 이유: 사람 확인받음(속도/재현성 우선). (A)는 화면 진입마다 추가 API 호출과 지연이 생기고,
+  데모/테스트 때마다 다른 문구가 나와 재현성이 떨어진다. (B)는 즉시 표시 가능하고 결정론적이라
+  데모·자동화 검증 모두에 유리하다. 고정 문구라도 `SYSTEM_PROMPT`와 같은 톤(1~3문장, 목록/
+  마크다운 없음)으로 맞춰 두면 이후 (A)로 전환할 때 위화감이 없다.
+- 영향받는 범위: `src/state-machine/useConversationMachine.ts`(`FIXED_GREETINGS`, `greet()`),
+  `src/state-machine/types.ts`/`conversationReducer.ts`(`GREETING_STARTED` 이벤트,
+  `idle → assistant_speaking` 전이 추가). **되돌릴 때 변경 범위**: `greet()`의 문구 선택 부분만
+  실제 `streamClaudeResponse` 호출로 바꾸면 되고, 상태머신/`ConversationScreen`은 무변경
+  (`GREETING_STARTED`를 실시간 생성 완료 시점에 그대로 재사용 가능).
+
+### 2026-08-25 PRD 4장 Happy Path 9번: 종료 후 이동 — App.tsx에 화면 전환 상태 추가
+
+- 배경/문제: "수동 종료 버튼으로 세션을 마친다"고만 되어 있고 종료 후 어디로 가는지는
+  PRD에 없다. 게다가 지금까지 `App.tsx`는 `NotificationSetup`과 `ConversationScreen`을 항상
+  같이 렌더링하고 있어(Day 2부터 이어진 임시 배치 방식), 실제 화면 전환/라우팅 자체가 없었다.
+- 검토한 대안: (A) `App.tsx`에 `useState<'setup'|'conversation'>` 화면 전환 상태를 추가해 한
+  번에 한 화면만 렌더링. 종료 시 `setup`으로 복귀, `NotificationSetup`의 "지금 시작하기"·
+  대화 화면 진입 시 `conversation`으로 전환. (B) 지금 구조를 유지하고 "종료"는 대화 상태만
+  `idle`로 리셋(화면 이동 없음).
+  트레이드오프를 사람에게 설명(재진입=재마운트이므로 Happy Path 3번의 "화면 진입 시 자동
+  인사말"과도 자연스럽게 맞물린다는 점, (B)는 화면 이동이라는 개념 자체가 없어져 이번 요청의
+  취지를 못 채운다는 점)한 뒤 확인받음.
+- 결정: (A).
+- 이유: 사람 확인받음(트레이드오프 설명 후 (A) 선택). 라우터 라이브러리 없이 상태 하나로
+  충분하다고 판단(URL 딥링크 요구사항 없음, 화면 2개뿐) — 과설계 방지. 부수적으로
+  `NotificationSetup`의 "지금 시작하기" placeholder(Day 2 결정, "Day 3+에서 실제 네비게이션으로
+  교체 필요"로 이미 예고돼 있었음)도 이번에 실제 연결로 교체.
+- 영향받는 범위: `src/App.tsx`(`screen` state), `src/components/NotificationSetup/NotificationSetup.tsx`
+  (`onStartConversation` prop, `START_NOW_PLACEHOLDER` 제거), `src/components/ConversationScreen/ConversationScreen.tsx`
+  (`onEnd` prop). **범위 밖으로 남긴 것**: 실제 브라우저 알림(OS 알림) 클릭 시 이 화면 전환
+  상태로 연결하는 것은 Service Worker↔페이지 메시징이 추가로 필요해 이번엔 포함하지 않음
+  (`src/sw.ts`의 `notificationclick`은 여전히 루트만 엶 — 기존에도 알려진 제한).
+
+### 2026-08-25 `beginListeningEngine()`에 `isSpeechInputSupported()` 가드 추가 — 부수 발견 버그 수정
+
+- 배경/문제: Happy Path 3번(자동 인사말) 구현 중 발견 — 인사말이든 일반 응답이든 TTS 재생이
+  끝나면(`playAssistantSpeech`의 `onEnd`) 항상 `beginListeningEngine()`을 호출해 마이크를
+  재시작하려 했는데, 이 함수는 브라우저가 음성 인식을 지원하는지 확인하지 않았다. 즉 텍스트
+  폴백 모드(미지원 브라우저)에서도 TTS가 끝날 때마다 `WebSpeechInputEngine.start()`가 불려
+  즉시 `unsupported` 에러를 내고 상태가 `error`로 튕기는 잠재 버그가 Day 5 때부터 있었다(Day 5
+  검증은 가짜 `SpeechRecognition`으로 "지원함"을 재현했기 때문에 이 경로를 안 건드려 못 잡았음).
+- 결정: `beginListeningEngine()` 맨 앞에 `if (!isSpeechInputSupported()) return` 가드 추가.
+- 이유: 사람 확인 없이 결정(명백한 버그 수정, 낮은 리스크) — 텍스트 폴백 모드는
+  `TextInputFallback`의 제출이 곧 다음 턴 트리거라 마이크 엔진이 애초에 필요 없고, 상태는
+  이미 호출자가 `listening`으로 전환해둔 상태라 이 가드만 추가해도 아무 부작용이 없다.
+- 영향받는 범위: `src/state-machine/useConversationMachine.ts`(`beginListeningEngine`).
+
+### 2026-08-25 "대화 종료" 버튼을 상태와 무관하게 항상 활성화 — 사람 확인 없이 결정
+
+- 배경/문제: 화면 전환이 생기면서 "대화 종료" 버튼이 단순 상태 리셋이 아니라 "화면을 완전히
+  나가는" 버튼이 됐다. 기존엔 `isActive`(status가 idle/error가 아닐 때)에서만 활성화됐는데,
+  이 규칙을 그대로 두면 인사말이 나오기 전(아직 idle)이나 에러 상태에서는 화면을 나갈 방법이
+  없어진다.
+- 결정: `disabled` 조건 제거, 항상 클릭 가능하게 변경.
+- 이유: 사람 확인 없이 결정(낮은 리스크, 되돌리기 쉬움) — "화면을 나가는" 버튼은 대화가
+  진행 중이든 아니든 항상 눌릴 수 있어야 자연스럽다고 판단. `stop()`은 idle 상태에서 불려도
+  안전(이미 비어있는 걸 다시 정리할 뿐).
+- 영향받는 범위: `src/components/ConversationScreen/ConversationScreen.tsx`(종료 버튼).
+
+### 2026-08-25 TTS `lang`/언어 스코프 명확화: 지금은 "테스트 편의상 한국어", PRD 목표는 다국어
+
+- 배경/문제: TTS 폴리싱 작업 중 `utterance.lang = 'ko-KR'`을 하드코딩했는데, PRD/CLAUDE.md
+  어디에도 "이 앱이 한국어 전용"이라고 명시된 적은 없다 — "아침 스몰토크로 회화 연습"이라는
+  목적만 고정돼 있을 뿐, 실제 제품 목표는 영어 → 일본어 → 스페인어 → 한국어(외국인 대상) 순으로
+  지원 언어를 늘려가는 것이었다. 지금 한국어로 개발/테스트하는 건 음성 스트리밍 파이프라인
+  자체(STT→LLM→TTS 왕복)를 검증하기 편해서 택한 임시 선택이지, "한국어 전용"이라는 스코프
+  결정이 내려진 적은 없었다 — 문서화가 안 돼 있으면 이후 작업자가 `ko-KR` 하드코딩을 영구
+  설계로 오해할 위험이 있어 기록해둔다.
+  - **참고**: 이번 항목은 사람이 "임의로 정하지 말고 확인해달라"고 요청한 결정 사항이 아니라,
+    이미 사람이 갖고 있던 제품 목표를 뒤늦게 문서로 옮겨 적은 것 — 새로 결정한 내용은 없음.
+- 결정: 없음(스코프 변경 아님) — 다만 다국어 전환 시 함께 바꿔야 할 지점을 코드 주석과 여기에
+  남겨 대비해둔다: (1) `WebSpeechSynthesisEngine.ts`의 `utterance.lang`, (2)
+  `useConversationMachine.ts`의 `SYSTEM_PROMPT`/`FIXED_GREETINGS`(전부 한국어 문자열), (3)
+  `WebSpeechInputEngine.ts`의 STT `SpeechRecognition.lang`(지금은 브라우저 기본값에 맡겨져
+  있어 이것도 명시적으로 맞춰야 함). 이 PoC 스코프(1주일)에서는 다국어 지원 자체를 구현하지
+  않고, 위 지점들을 한곳에서 관리하는 설정값으로 뽑아내는 리팩터링도 하지 않는다 — 지금은
+  "언젠가 다국어로 갈 것"이라는 사실만 기록해두는 선에서 그친다.
+- 영향받는 범위: 문서만(`docs/rules/PRD.md`/`ARCHITECTURE.md`는 아직 변경하지 않음 — 다국어
+  지원이 실제 작업으로 들어올 때 그쪽에도 반영 필요).

@@ -21,6 +21,17 @@ export function conversationReducer(
       }
       return state
 
+    // PRD 4장 Happy Path 3번 — 화면 진입 즉시, 사용자 조작 없이 AI가 먼저 인사말+질문을
+    // 낸다. idle에서만 의미가 있다(세션당 한 번). STREAM_DONE과 동일한 목적지(assistant_speaking)
+    // 로 보내 이후 흐름(TTS 재생 → ASSISTANT_SPEECH_DONE → listening, 마이크 자동 활성화)을
+    // 그대로 재사용한다 — "고정 문구든 LLM 스트리밍이든 일단 assistant_speaking에 들어오면
+    // 그 다음은 똑같다"는 것이 이 상태머신의 설계 의도(docs/log/DECISIONS.md 참고).
+    case 'GREETING_STARTED':
+      if (state.status === 'idle') {
+        return { ...state, status: 'assistant_speaking', assistantText: event.text, transcript: '' }
+      }
+      return state
+
     case 'INTERIM_RESULT':
       if (state.status === 'listening' || state.status === 'user_speaking') {
         return { ...state, status: 'user_speaking', transcript: event.text }
@@ -69,12 +80,12 @@ export function conversationReducer(
       }
       return state
 
-    // 스트리밍 완료 → listening으로 복귀(PRD 6장 streaming → assistant_speaking → listening 중
-    // assistant_speaking은 이번 단계에서 생략하기로 확인받음, docs/log/DECISIONS.md 참고).
+    // 스트리밍 완료 → assistant_speaking으로 전이(PRD 6장 streaming → assistant_speaking →
+    // listening). TTS 재생이 끝난 뒤에야 listening으로 복귀한다(ASSISTANT_SPEECH_DONE 참고).
     // transcript는 다음 사용자 턴을 위해 비운다.
     case 'STREAM_DONE':
       if (state.status === 'streaming') {
-        return { ...state, status: 'listening', transcript: '' }
+        return { ...state, status: 'assistant_speaking', transcript: '' }
       }
       return state
 
@@ -82,6 +93,14 @@ export function conversationReducer(
     case 'STREAM_ERROR':
       if (state.status === 'sending' || state.status === 'streaming') {
         return { ...state, status: 'error', error: event.error }
+      }
+      return state
+
+    // TTS 재생 종료 → listening 복귀(PRD 6장 assistant_speaking → listening). assistant_speaking
+    // 에서만 의미가 있다 — 다른 상태에서는 무시(기존 원칙과 동일한 불가능한 전이 차단).
+    case 'ASSISTANT_SPEECH_DONE':
+      if (state.status === 'assistant_speaking') {
+        return { ...state, status: 'listening' }
       }
       return state
 

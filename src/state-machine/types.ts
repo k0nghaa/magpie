@@ -1,10 +1,16 @@
 import type { SpeechInputError } from '../adapters/types.ts'
 
-// Day 4: LLM 스트리밍 어댑터(claudeProxy)가 생겨서 streaming을 추가한다. assistant_speaking은
-// 이번에도 제외한다 — TTS(SpeechOutputEngine)가 Day 5에나 생기는데 지금 추가하면 "TTS 없이
-// 즉시 통과"할지 "별도 대기 상태로 둘지"를 정할 근거가 없는 상태로 만들게 되어, streaming이
-// 끝나면 바로 listening으로 돌아간다(사람 확인 후 결정, docs/log/DECISIONS.md 참고).
-export type ConversationStatus = 'idle' | 'listening' | 'user_speaking' | 'sending' | 'streaming' | 'error'
+// Day 4: LLM 스트리밍 어댑터(claudeProxy)가 생겨서 streaming을 추가했다. Day 5: TTS
+// 어댑터(WebSpeechSynthesisEngine)가 생겨 assistant_speaking을 추가한다 — streaming 완료 후
+// 응답을 다 읽어줄 때까지 마이크가 꺼져 있는 상태(PRD 6장)를 명시적으로 표현한다.
+export type ConversationStatus =
+  | 'idle'
+  | 'listening'
+  | 'user_speaking'
+  | 'sending'
+  | 'streaming'
+  | 'assistant_speaking'
+  | 'error'
 
 export interface ConversationMachineState {
   status: ConversationStatus
@@ -27,4 +33,6 @@ export type ConversationEvent =
   | { type: 'STREAM_DELTA'; text: string }
   | { type: 'STREAM_DONE' }
   | { type: 'STREAM_ERROR'; error: SpeechInputError }
+  | { type: 'ASSISTANT_SPEECH_DONE' }
+  | { type: 'GREETING_STARTED'; text: string }
   | { type: 'RESET' }
