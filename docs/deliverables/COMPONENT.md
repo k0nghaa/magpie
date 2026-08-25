@@ -19,8 +19,9 @@
 | `TurnIndicator` | 현재 상태를 시각적+aria-live로 표시 | 자동 전환의 핵심 UX |
 | `ResumeSpeakingButton` | 무음 오탐 시 복구용 (구현 완료, Day 3) | `user_speaking`/`sending`에서만 렌더링, 클릭 시 `listening` 복귀 |
 | `TextInputFallback` | 음성 미지원 환경 자동 노출 (구현 완료, Day 3) | 전송 버튼/Enter가 턴 종료 신호, 무음 감지 로직 없음 |
-| `StreamingIndicator` | 스트리밍 중 표시 | |
-| `ErrorBanner`, `EmptyState` | 예외 상태 | |
+| `StreamingIndicator` | 스트리밍 중 표시 (구현 완료, Day 4) | `sending`/`streaming`에서만 렌더링, 응답 대기와 토큰 수신 중 문구 구분 |
+| `ErrorBanner` | 예외 상태 — API/네트워크 오류 (구현 완료, Day 4) | 에러 메시지 + "재시도"(idle로 복귀, 자동 재전송 아님) |
+| `EmptyState` | 예외 상태 — 첫 진입 시 빈 화면 (구현 완료, Day 4) | `idle`에서만 렌더링 |
 
 ## 3. 상태관리 설계 근거
 
@@ -170,6 +171,43 @@
      기준 적용).
   4. `npm run verify:silence-timer`(Day 3 회귀 스위트, 21개 케이스) 재실행 — 전부 PASS, 기존
      idle/listening/user_speaking/sending/error 전이 회귀 없음 확인.
+
+## 3-2. Day 4 후속: `StreamingIndicator` / `ErrorBanner` / `EmptyState`
+
+- **가시성 규칙을 컴포넌트 자체에 내장**: `ResumeSpeakingButton`(Day 3)과 동일한 패턴 —
+  `StreamingIndicator`는 `status`가 `sending`/`streaming`일 때만, `EmptyState`는 `idle`일 때만
+  렌더링을 스스로 결정한다. `EmptyState`가 `status === 'idle'`만 보고 판단해도 되는 이유:
+  리듀서상 `idle`은 초기 상태 또는 `RESET` 직후뿐이고, 두 경우 모두 `transcript`/`assistantText`
+  가 항상 비어 있다(`conversationReducer.ts`) — 그래서 별도로 "내용이 비어 있는지"를 확인하는
+  prop 없이 `status`만으로 충분하다.
+- **`StreamingIndicator`가 `sending`도 포함하는 이유**: PRD 컴포넌트 목록에 별도의 "로딩 표시"
+  컴포넌트가 없다. `sending`(요청을 보내고 첫 토큰을 기다리는 중)과 `streaming`(토큰 수신 중)은
+  사용자 입장에서 둘 다 "AI가 작업 중"이라는 같은 의미라 하나의 컴포넌트로 묶고 문구만
+  구분했다(Day 4 지시사항의 "로딩·에러·빈 화면 컴포넌트 완성"에서 "로딩"에 해당).
+- **`ErrorBanner`의 "재시도"는 자동 재전송이 아니라 idle 복귀**: 사람 확인 없이 결정(낮은
+  리스크) — 근거는 `docs/log/DECISIONS.md` 2026-08-25 항목. `onRetry`에 `useConversationMachine`
+  이 이미 갖고 있던 `stop()`(엔진 정지 + 스트림 abort + `RESET` 디스패치)을 그대로 넘겨써서 새
+  코드 없이 해결했다.
+- **부수적으로 발견한 버그**: 텍스트 폴백 모드에서 LLM 스트리밍이 실패해 `error` 상태가 되면,
+  리듀서가 `error`에서의 `TEXT_SUBMITTED`를 무시하도록 돼 있어(불가능한 전이 차단) 사용자가
+  아무리 다시 입력해도 반응이 없는 복구 불가 상태였다 — `ErrorBanner`를 만들면서 발견, 재시도
+  버튼이 idle로 되돌려주는 것으로 함께 해결됨.
+- **실제 실행 검증(Playwright)**:
+  1. `EmptyState`: 첫 진입(idle) 시 노출, `error` 상태 진입 시 숨겨짐, 재시도로 idle 복귀 시
+     다시 노출됨을 확인.
+  2. `ErrorBanner` + 네트워크 끊김 재현: Playwright 공식 API `page.route(url, route =>
+     route.abort())`로 `/api/claude-stream` 요청을 실제로 실패시켜 재현(브라우저 devtools
+     오프라인 토글과 동일한 효과를 코드로 결정론적으로 재현하는 공식 방법 — 지어낸 방법 아님).
+     `ErrorBanner`가 노출되고 사유가 정확히 `network`로 분류됨을 확인. 이 과정에서 순수 fetch
+     레벨 실패(TypeError)가 원래 `unknown`으로 잘못 분류되던 것을 발견해 `claudeProxy.ts`를
+     고치고(`fetch()` 자체의 실패를 `network`로 매핑) `verify:claude-proxy`에 회귀 케이스 추가.
+  3. 재시도 클릭 → idle 복귀 + `EmptyState` 재노출 확인 → `page.unroute()`로 네트워크 복구 후
+     재입력 → 실제 Claude 스트리밍 응답까지 정상 완주(자동 재전송이 아니라 사용자가 다시
+     시도한 것임을 그대로 보여줌).
+  4. `StreamingIndicator` 문구가 `sending`/`streaming` 동안 노출됨을 확인.
+  5. 마이크 경로(Day 3와 동일한 가짜 `SpeechRecognition`)로도 회귀 없이 정상 동작 재확인.
+  6. `npm run verify:claude-proxy`(신규 케이스 포함 총 6개 시나리오), `verify:silence-timer`
+     모두 PASS, `npx tsc -b`/`npm run lint` 통과(경고는 Day 4에서 문서화한 기존 2건과 동일).
 
 ## 4. 어댑터 분리 설계 근거
 

@@ -1,6 +1,9 @@
 import { isSpeechInputSupported } from '../../adapters/speech-input/WebSpeechInputEngine.ts'
 import { useConversationMachine } from '../../state-machine/useConversationMachine.ts'
+import EmptyState from '../ConversationScreen/EmptyState.tsx'
+import ErrorBanner from '../ConversationScreen/ErrorBanner.tsx'
 import ResumeSpeakingButton from '../ConversationScreen/ResumeSpeakingButton.tsx'
+import StreamingIndicator from '../ConversationScreen/StreamingIndicator.tsx'
 import TextInputFallback from '../ConversationScreen/TextInputFallback.tsx'
 
 const STATUS_LABEL: Record<string, string> = {
@@ -20,7 +23,6 @@ function SpeechInputDemo() {
   const { state, start, stop, resumeSpeaking, submitText } = useConversationMachine()
 
   const isActive = state.status !== 'idle' && state.status !== 'error'
-  const isPermissionDenied = state.error?.reason === 'permission-denied'
 
   return (
     <section className="flex w-full max-w-sm flex-col gap-4 rounded-xl border border-neutral-200 p-6">
@@ -62,9 +64,13 @@ function SpeechInputDemo() {
         상태: {STATUS_LABEL[state.status]}
       </p>
 
+      <EmptyState status={state.status} />
+
       <p aria-live="polite" className="min-h-6 text-sm text-neutral-700">
         {state.transcript}
       </p>
+
+      <StreamingIndicator status={state.status} />
 
       {/* PRD 6장 목표: 실제 Claude 응답이 토큰 단위로 스트리밍 렌더링되는지 눈으로 확인하기
           위한 임시 표시 영역 — 정식 ChatMessageList/ChatBubble은 Day 5(ConversationScreen)에서 만든다. */}
@@ -75,18 +81,9 @@ function SpeechInputDemo() {
         </p>
       )}
 
-      {isPermissionDenied && (
-        <p aria-live="polite" className="text-sm text-neutral-600">
-          마이크가 차단되었습니다. 브라우저 설정에서 직접 허용해야 합니다.
-        </p>
-      )}
-
-      {state.error && !isPermissionDenied && (
-        <p aria-live="polite" className="text-sm text-neutral-600">
-          오류가 발생했습니다: {state.error.reason}
-          {state.error.message ? ` (${state.error.message})` : ''}
-        </p>
-      )}
+      {/* 재시도는 실패한 요청을 자동으로 다시 보내지 않고 idle로 되돌리기만 한다 — stop()이
+          엔진/스트림 정리까지 함께 해줘서 그대로 재사용(ErrorBanner.tsx 상단 주석 참고). */}
+      {state.error && <ErrorBanner error={state.error} onRetry={stop} />}
     </section>
   )
 }

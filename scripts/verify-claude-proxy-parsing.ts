@@ -165,6 +165,29 @@ async function testMissingDoneSignalTreatedAsNetworkError() {
   )
 }
 
+async function testFetchRejectionTreatedAsNetworkError() {
+  console.log('\n=== fetch() 자체가 거부된 경우(오프라인, DNS 실패 등 연결 불가) ===')
+
+  let thrown: unknown = null
+  await withFakeFetch(
+    (async () => {
+      throw new TypeError('Failed to fetch')
+    }) as typeof fetch,
+    async () => {
+      try {
+        await streamClaudeResponse({ messages: [], onTextDelta: () => {} })
+      } catch (err) {
+        thrown = err
+      }
+    },
+  )
+
+  assert(
+    thrown instanceof ClaudeStreamError && thrown.reason === 'network',
+    'fetch() 자체가 거부되면(Response 없음) network 사유의 ClaudeStreamError로 던져짐',
+  )
+}
+
 async function testAbortErrorPassesThroughUnwrapped() {
   console.log('\n=== AbortController로 취소한 경우: ClaudeStreamError로 감싸지 않고 그대로 전달 ===')
 
@@ -195,6 +218,7 @@ await testNormalStreamingAcrossChunkBoundaries()
 await testServerErrorEventMidStream()
 await testHttpLevelFailure()
 await testMissingDoneSignalTreatedAsNetworkError()
+await testFetchRejectionTreatedAsNetworkError()
 await testAbortErrorPassesThroughUnwrapped()
 
 if (process.exitCode === 1) {

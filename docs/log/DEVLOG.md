@@ -481,6 +481,46 @@
     `user_speaking`/`sending`에서만 노출). 실질적으로 발생하기 어려운 경계 케이스라 이번엔 별도
     취소 로직을 추가하지 않음.
 
+### 후속 — `StreamingIndicator`/`ErrorBanner`/`EmptyState` 완성 (2026-08-25)
+
+- 요청 내용: PRD 6장 컴포넌트 목록·Day 4 "로딩·에러·빈 화면 컴포넌트 완성"에 따라 세 컴포넌트
+  신설. 스트리밍 연동을 `SpeechInputDemo`에 최소한으로 배선. 네트워크 끊김 재현 방법이 불확실하면
+  지어내지 말고 검증된 방법만 사용.
+- 완료 사항:
+  - `src/components/ConversationScreen/StreamingIndicator.tsx`(신규): `sending`/`streaming`에서만
+    노출, 응답 대기/토큰 수신 중 문구를 구분.
+  - `src/components/ConversationScreen/ErrorBanner.tsx`(신규): 에러 메시지 + "재시도" 버튼.
+    "재시도"는 실패한 요청을 자동으로 다시 보내지 않고 `stop()`(기존 함수 재사용)으로 idle까지만
+    되돌린다(사람 확인 없이 결정, 낮은 리스크, `docs/log/DECISIONS.md` 참고).
+  - `src/components/ConversationScreen/EmptyState.tsx`(신규): `idle`에서만 노출.
+  - `SpeechInputDemo.tsx`: 기존 ad-hoc 에러 문구 두 벌(권한거부/일반 에러)을 `ErrorBanner` 하나로
+    통합, `EmptyState`/`StreamingIndicator` 배선.
+  - **부수적으로 발견한 버그**: 텍스트 폴백 모드에서 LLM 스트리밍이 실패해 `error` 상태가 되면,
+    리듀서가 `error`에서의 `TEXT_SUBMITTED`를 무시해(불가능한 전이 차단) 사용자가 다시 입력해도
+    복구할 방법이 전혀 없었다 — `ErrorBanner`의 재시도 버튼이 idle로 되돌려 함께 해결.
+  - **`claudeProxy.ts` 에러 분류 보정**: `page.route().abort()`로 네트워크 끊김을 재현하는 과정에서,
+    순수 `fetch()` 실패(Response를 아예 못 받는 경우, TypeError)가 `network`가 아니라 `unknown`
+    으로 잘못 분류되던 것을 발견 — `fetch()` 호출을 try/catch로 감싸 `AbortError`는 그대로
+    통과시키고 나머지는 `network` 사유로 매핑하도록 수정. `scripts/verify-claude-proxy-parsing.ts`
+    에 회귀 케이스 추가(총 6개 시나리오).
+  - **실제 실행 검증(Playwright)**: (1) 첫 진입 시 `EmptyState` 노출 확인. (2) 네트워크 끊김은
+    Playwright 공식 API `page.route(url, route => route.abort())`로 재현(브라우저 devtools
+    오프라인 토글을 코드로 결정론적으로 재현하는 공식 방법) → `ErrorBanner` 노출 + 사유가
+    정확히 `network`로 분류됨을 확인. (3) 재시도 클릭 → idle 복귀, `EmptyState` 재노출 확인.
+    (4) `page.unroute()`로 네트워크 복구 후 재입력 → 실제 Claude 스트리밍 응답까지 정상 완주
+    (자동 재전송이 아니라 사용자가 직접 재시도한 것임을 확인). (5) `StreamingIndicator` 문구가
+    `sending`/`streaming` 동안 정상 노출됨을 확인. (6) 마이크 경로(Day 3와 동일한 가짜
+    `SpeechRecognition`)도 회귀 없이 정상 동작 재확인. 전 과정 페이지 에러 0건.
+  - `npm run verify:claude-proxy`(6개 시나리오), `npm run verify:silence-timer`(21개 케이스)
+    모두 PASS. `npx tsc -b`, `npm run lint` 통과(경고는 기존 2건과 동일, 신규 없음). 프로덕션
+    빌드(`dist/`)에 API 키 미노출 재확인.
+- DoD 체크: 해당 없음(Day 4 DoD 자체는 이미 통과 — 이번은 Day 4 지시사항 중 남아 있던
+  "로딩·에러·빈 화면 컴포넌트 완성" 항목을 마저 채운 후속 작업).
+- 이슈/메모:
+  - `TextInputFallback`은 `error` 상태에서도 폼 자체는 그대로 보인다 — 제출해도 리듀서가
+    무시(no-op)할 뿐 에러가 나거나 이상 동작하진 않는다. 입력을 아예 비활성화하는 것까지는
+    이번 범위 밖으로 판단(과설계 방지) — 필요하면 알려주면 추가.
+
 ## Day 5 — TTS & 자동 사이클 완성
 
 - 요청 내용:

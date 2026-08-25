@@ -37,12 +37,23 @@ export async function streamClaudeResponse({
   onTextDelta,
   signal,
 }: StreamClaudeResponseParams): Promise<void> {
-  const response = await fetch('/api/claude-stream', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages, system }),
-    signal,
-  })
+  let response: Response
+  try {
+    response = await fetch('/api/claude-stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages, system }),
+      signal,
+    })
+  } catch (err) {
+    // AbortController로 취소한 경우(DOMException 'AbortError')는 그대로 통과시킨다 — 호출자가
+    // "진짜 실패"와 "의도된 취소"를 구분해야 하기 때문(아래 [DONE] 없는 종료 케이스와 다르게,
+    // 이건 우리가 만든 에러가 아니라 브라우저가 던진 것 그대로다).
+    if (err instanceof DOMException && err.name === 'AbortError') throw err
+    // 연결 자체가 안 되는 경우(오프라인, DNS 실패, 서버 다운 등) fetch()는 Response 없이
+    // TypeError를 던진다 — PRD 4장 "네트워크 끊김" 시나리오의 가장 흔한 형태라 network로 분류.
+    throw new ClaudeStreamError('network', err instanceof Error ? err.message : String(err))
+  }
 
   if (!response.ok || !response.body) {
     throw new ClaudeStreamError('network', `요청 실패: ${response.status} ${response.statusText}`)
