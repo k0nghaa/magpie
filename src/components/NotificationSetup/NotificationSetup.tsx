@@ -42,6 +42,15 @@ function NotificationSetup({ onStartConversation }: NotificationSetupProps) {
     engineRef.current = new BrowserNotificationEngine()
   }
 
+  // Day 6 성능 계측(docs/rules/PRD.md 6장): "로드 시작"(네비게이션 타임 오리진, start: 0)부터
+  // 이 화면이 처음 마운트되어 상호작용 가능해지는 시점까지의 시간을 기록한다. 코드 스플리팅
+  // 전/후 비교용이며, 값은 `performance.getEntriesByName()`으로 외부에서 읽는다.
+  useEffect(() => {
+    performance.mark('notification-setup-interactive')
+    performance.measure('load-to-notification-setup-interactive', { start: 0, end: 'notification-setup-interactive' })
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 마운트 시 1회만 계측
+  }, [])
+
   /**
    *  "재호출될 수 있는 상황"의 실제 트리거는 시간 입력 변경과 권한 허용 전환
    */
