@@ -1,6 +1,7 @@
 import { useEffect, useReducer, useRef } from 'react'
 import { WebSpeechInputEngine } from '../adapters/speech-input/WebSpeechInputEngine.ts'
-import type { SpeechInputEngine } from '../adapters/types.ts'
+import { WebSpeechSynthesisEngine } from '../adapters/speech-output/WebSpeechSynthesisEngine.ts'
+import type { SpeechInputEngine, SpeechOutputEngine } from '../adapters/types.ts'
 import { ClaudeStreamError, streamClaudeResponse, type ClaudeMessage } from '../api/claudeProxy.ts'
 import { conversationReducer, initialConversationState } from './conversationReducer.ts'
 import { createSilenceTimer } from './silenceTimer.ts'
@@ -10,13 +11,29 @@ import { createSilenceTimer } from './silenceTimer.ts'
 // 메시지 2개이므로 히스토리는 최대 N*2개 메시지만 유지한다.
 const HISTORY_WINDOW_TURNS = 3
 
+// Day 5: 지금까지 system 프롬프트를 전혀 안 보내고 있었다(claudeProxy.ts/api/claude-stream.ts엔
+// system 필드가 이미 있었는데 호출부에서 안 채워 넣은 상태) — 그 결과 Claude가 기본값대로 길고
+// 목록/마크다운 위주의 "문서형" 답변을 했다. PRD 1장의 핵심 루프는 "아침 10분 스몰토크"이고,
+// 이 응답을 TTS로 그대로 읽어주는 게 목표라 짧고 구어체인 응답이 UX상으로도, TTS 재생 안정성
+// 상으로도(길수록 Chromium의 알려진 장문 재생 버그를 더 자주 건드림) 유리하다(사람 확인 후 결정).
+const SYSTEM_PROMPT = `당신은 사용자와 아침에 짧게 스몰토크를 나누는 친근한 대화 상대입니다.
+- 실제 대화처럼 1~3문장으로 짧고 자연스럽게 답합니다.
+- 목록(-, 1. 2. 3.)이나 마크다운 서식을 쓰지 않습니다 — 이 텍스트는 음성으로 그대로 읽힙니다.
+- 실시간 정보(날씨·뉴스 등)에 접근할 수 없으면 짧게만 인정하고 자연스럽게 다른 화제로 이어갑니다.
+- 대화가 이어지도록 가끔 짧은 되물음을 섞습니다.`
+
 // 엔진을 팩토리로 주입받는다 — PRD 3장 검증 기준("mock 구현으로 교체해도 상태머신이 무변경으로
 // 동작")을 그대로 만족하기 위함. 기본값은 실제 WebSpeechInputEngine. start/stop은 버튼 클릭 같은
 // 이벤트 핸들러에서만 불리고 자식에게 안정적인 참조로 넘길 일이 없어(React.memo 대상 아님)
 // useCallback으로 메모이즈하지 않는다 — 매 렌더 재생성돼도 비용이 없다.
-export function useConversationMachine(engineFactory: () => SpeechInputEngine = () => new WebSpeechInputEngine()) {
+export function useConversationMachine(
+  engineFactory: () => SpeechInputEngine = () => new WebSpeechInputEngine(),
+  ttsEngineFactory: () => SpeechOutputEngine = () => new WebSpeechSynthesisEngine(),
+) {
   const [state, dispatch] = useReducer(conversationReducer, initialConversationState)
   const engineRef = useRef<SpeechInputEngine | null>(null)
+  // 현재 재생 중인 TTS 엔진 인스턴스 — 수동 중지/언마운트 시 재생을 즉시 멈추기 위해 보관한다.
+  const ttsEngineRef = useRef<SpeechOutputEngine | null>(null)
   // 무음 타이머 콜백은 mount 시점에 딱 한 번 생성되는 클로저라 이후 렌더의 state를 못 본다
   // (React가 useRef 초기값 인자를 첫 렌더 이후엔 버림) — 그래서 "지금 사용자가 뭐라고
   // 말했는지"는 이 ref에 INTERIM_RESULT가 올 때마다 직접 갱신해서 읽는다(엔진/타이머 ref와
@@ -54,6 +71,7 @@ export function useConversationMachine(engineFactory: () => SpeechInputEngine = 
 
       await streamClaudeResponse({
         messages: requestMessages,
+        system: SYSTEM_PROMPT,
         onTextDelta: (text) => {
           assistantText += text
           dispatch({ type: 'STREAM_DELTA', text })
@@ -67,6 +85,7 @@ export function useConversationMachine(engineFactory: () => SpeechInputEngine = 
         { role: 'assistant', content: assistantText },
       ]
       dispatch({ type: 'STREAM_DONE' })
+      playAssistantSpeech(assistantText)
     } catch (err) {
       // 언마운트/stop()으로 우리가 직접 abort()한 경우엔 에러로 취급하지 않는다 — 사용자에게
       // 보여줄 실패가 아니라 의도된 중단이다.
@@ -89,9 +108,13 @@ export function useConversationMachine(engineFactory: () => SpeechInputEngine = 
     void runSendCycle(transcriptRef.current)
   }
 
-  function start() {
+  // start()와 "TTS 재생 종료 후 마이크 재개" 양쪽에서 쓰는 공통 로직 — 새 엔진 인스턴스를 만들어
+  // 리스닝을 시작한다. 항상 새 세션으로 시작되는 것이 의도된 동작이다(직전 continuous 세션을
+  // 이어받지 않음 — PRD 4장 "재생 종료 시 인식기 재개"는 세션 보존을 요구하지 않음, 사람 확인
+  // 후 결정한 이번 스코프: Day 1 SpeechInputEngine에 pause/resume 메서드를 새로 추가하지 않고
+  // 기존 stop()/start() 재호출만으로 mute를 구현하기로 함).
+  function beginListeningEngine() {
     transcriptRef.current = ''
-    dispatch({ type: 'START_LISTENING' })
     const engine = engineFactory()
     engineRef.current = engine
     engine.start(
@@ -113,11 +136,53 @@ export function useConversationMachine(engineFactory: () => SpeechInputEngine = 
     )
   }
 
+  // assistant_speaking 진입 시 호출 — 먼저 마이크를 끄고(에코 방지, PRD 4장 예외 시나리오) TTS를
+  // 재생한 뒤, 재생이 끝나면(onEnd) listening으로 복귀하며 마이크를 다시 켠다.
+  function playAssistantSpeech(text: string) {
+    engineRef.current?.stop()
+    engineRef.current = null
+
+    // 스트리밍 응답이 비어있는 드문 경우(예: 빈 델타만 도착) — 재생할 내용이 없으므로 TTS를
+    // 건너뛰고 바로 listening으로 복귀한다. speak('')의 동작은 MDN에 명시돼 있지 않아 호출
+    // 자체를 하지 않는 쪽을 택함(추측성 동작에 기대지 않기 위함).
+    if (text.trim() === '') {
+      dispatch({ type: 'ASSISTANT_SPEECH_DONE' })
+      beginListeningEngine()
+      return
+    }
+
+    const ttsEngine = ttsEngineFactory()
+    ttsEngineRef.current = ttsEngine
+    ttsEngine.speak(text, () => {
+      // 그 사이 stop()으로 이미 취소된 재생이면(ttsEngineRef가 다른 값으로 바뀌었거나 비었으면)
+      // 여기서 다시 상태를 되돌리지 않는다 — stop()이 이미 RESET을 처리했다.
+      if (ttsEngineRef.current !== ttsEngine) return
+      ttsEngineRef.current = null
+      dispatch({ type: 'ASSISTANT_SPEECH_DONE' })
+      beginListeningEngine()
+    })
+  }
+
+  function start() {
+    dispatch({ type: 'START_LISTENING' })
+    beginListeningEngine()
+  }
+
+  // SpeechOutputEngine 인터페이스(Day 1)엔 cancel()이 없다 — 재생 중 수동 중지를 위한 내부
+  // 전용 메서드라 어댑터 구현체에 있을 때만 옵셔널하게 호출한다(구현체가 없거나 mock이면 그냥
+  // 넘어감, 인터페이스 시그니처 변경 없이 처리).
+  function cancelTtsPlayback() {
+    const ttsEngine = ttsEngineRef.current as (SpeechOutputEngine & { cancel?: () => void }) | null
+    ttsEngine?.cancel?.()
+    ttsEngineRef.current = null
+  }
+
   function stop() {
     silenceTimerRef.current.cancel()
     engineRef.current?.stop()
     engineRef.current = null
     activeStreamControllerRef.current?.abort()
+    cancelTtsPlayback()
     dispatch({ type: 'RESET' })
   }
 
@@ -148,6 +213,7 @@ export function useConversationMachine(engineFactory: () => SpeechInputEngine = 
       silenceTimerRef.current.cancel()
       engineRef.current?.stop()
       activeStreamControllerRef.current?.abort()
+      cancelTtsPlayback()
     }
   }, [])
 

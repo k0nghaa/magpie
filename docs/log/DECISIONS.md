@@ -283,3 +283,67 @@
   상태가 되면, 리듀서가 `error` 상태에서의 `TEXT_SUBMITTED`를 무시하도록 되어 있어(불가능한
   전이 차단 규칙) 사용자가 다시 입력해도 아무 반응이 없었다 — 복구 수단이 전무했던 잠재
   버그. `ErrorBanner`의 재시도 버튼이 `stop()`으로 idle로 되돌려 이 경로를 함께 복구함.
+
+### 2026-08-25 Day 5: `assistant_speaking` 상태 추가 (Day 4 결정 뒤집음)
+
+- 배경/문제: Day 4에서 "TTS 어댑터가 없어 `assistant_speaking`을 이번엔 제외"로 결정했었는데
+  (위 2026-08-25 Day 4 항목), Day 5에서 `WebSpeechSynthesisEngine`이 생겨 그 전제가 사라졌다.
+- 결정: `streaming --STREAM_DONE--> assistant_speaking --ASSISTANT_SPEECH_DONE--> listening`으로
+  확장. `STREAM_DONE`의 목적지를 `listening`에서 `assistant_speaking`으로 바꾸고, 새 이벤트
+  `ASSISTANT_SPEECH_DONE`을 추가.
+- 이유: PRD 6장 원안 그대로. Day 4 결정문의 "아직 안 생긴 어댑터를 위해 상태만 미리 만들지
+  않는다"는 원칙과 정확히 반대 상황(이제 어댑터가 생겼다)이라 자연스럽게 뒤집힘.
+- 영향받는 범위: `src/state-machine/types.ts`, `conversationReducer.ts`,
+  `scripts/verify-silence-timer-logic.ts`(회귀 케이스 추가).
+
+### 2026-08-25 Day 5: 마이크 mute를 새 인터페이스 메서드 없이 기존 `stop()`/`start()` 재호출로 구현
+
+- 배경/문제: TTS 재생 중 마이크가 자기 음성을 인식하는 에코를 막아야 한다(PRD 4장). 일반적인
+  구현은 `SpeechInputEngine`에 `pause()`/`resume()` 메서드를 추가하는 것이지만, 사람이 먼저
+  "Day 1 인터페이스 시그니처 변경 없이, 기존 `stop()`/`start()` 재호출만으로 하라"고 스코프를
+  확정해서 시작함(대안 검토 없이 확정 지시).
+- 결정: `assistant_speaking` 진입 시 `engineRef.current?.stop()` → TTS 재생 → `onEnd`에서
+  `engineFactory()`로 **새 엔진 인스턴스**를 만들어 `start()` — 직전 continuous 세션을 이어받지
+  않고 항상 새 세션으로 마이크가 재개된다.
+- 이유: 사람이 이미 확정한 스코프. 부수 효과(새 세션이라 `transcript`도 함께 초기화됨)는
+  다음 사용자 턴이 시작되는 시점이라 문제 없다고 판단.
+- 영향받는 범위: `src/state-machine/useConversationMachine.ts`(`beginListeningEngine`,
+  `playAssistantSpeech`).
+
+### 2026-08-25 Day 5: `WebSpeechSynthesisEngine`에 인터페이스 밖 `cancel()` 메서드 추가 (사람 확인 없이 결정)
+
+- 배경/문제: 수동 "중지/초기화" 버튼을 누르거나 언마운트될 때, TTS가 재생 중이면 즉시 멈춰야
+  한다. 그런데 Day 1 `SpeechOutputEngine` 인터페이스엔 `speak(text, onEnd)`만 있고 취소 메서드가
+  없다 — 인터페이스를 확장할지, 인터페이스 밖의 구현체 전용 메서드로 둘지 선택 필요.
+- 검토한 대안: (A) `SpeechOutputEngine` 인터페이스에 `cancel()`을 추가(mock 구현체도 전부 이
+  메서드를 가져야 함). (B) `WebSpeechSynthesisEngine` 클래스에만 `cancel()`을 추가하고,
+  호출부는 `(engine as SpeechOutputEngine & { cancel?(): void })`로 옵셔널하게만 호출.
+- 결정: (B).
+- 이유: 사람 확인 없이 결정(낮은 리스크, 되돌리기 쉬움) — 이번 작업 지시 자체가 "Day 1 인터페이스
+  시그니처 변경 없음"이었고, `cancel()`은 재생 중 취소라는 부가 기능이라 인터페이스 계약(모든
+  구현체가 지켜야 할 최소 계약)에 넣을 필요가 없다고 판단. 옵셔널 체이닝으로 구현체가 없으면
+  조용히 넘어가 mock 구현체에 부담을 주지 않는다.
+- 영향받는 범위: `src/adapters/speech-output/WebSpeechSynthesisEngine.ts`(`cancel()`),
+  `src/state-machine/useConversationMachine.ts`(`cancelTtsPlayback()`).
+
+### 2026-08-25 Day 5: LLM에 system 프롬프트 추가 (스몰토크 스타일 강제) — 사람 지시로 결정
+
+- 배경/문제: Day 5 실제 브라우저 검증 중, TTS 재생이 종종 끝나지 않고 멈추는 문제를 발견했다.
+  원인을 추적해보니 Chromium의 알려진 버그(이슈 41294170/679437, "약 15초 후 장문 재생이
+  아무 이벤트 없이 멈춤")였고, 표준 우회법(주기적 `resume()` 호출)을 적용해도 이 환경에서는
+  간헐적으로만 효과가 있었다. 근본 원인을 더 파보니 애초에 `claudeProxy.ts`/`api/claude-stream.ts`
+  둘 다 `system` 필드를 이미 지원하는데 호출부(`useConversationMachine.ts`)가 한 번도 채워
+  보낸 적이 없어서, Claude가 기본값대로 목록·마크다운 위주의 긴 "문서형" 답변을 하고 있었다.
+  사람에게 상황을 그대로 보고했더니 "회화 앱인데 응답이 길고 회화처럼 안 느껴진다, 스몰토크
+  위주로 짧게 갔으면 좋겠다"는 지시를 받음.
+- 결정: `SYSTEM_PROMPT` 상수(1~3문장, 목록/마크다운 금지, 실시간 정보 모름을 짧게 인정, 가끔
+  되물음)를 만들어 `streamClaudeResponse` 호출 시 `system`으로 전달.
+- 이유: 사람 지시. PRD 1장의 핵심 루프("아침 10분 스몰토크")와도 정확히 일치하고, 응답이
+  짧아지면 TTS 재생 시간도 줄어 위 Chromium 버그를 실질적으로 덜 건드리게 되는 부수 효과도
+  확인(실제 재검증: 66자/53자/42자 응답 3턴 모두 TTS 끝까지 재생 후 정상적으로 `listening`
+  복귀). 다만 이 버그 자체가 완전히 해결된 것은 아니고(짧아서 안 걸릴 확률이 낮아졌을 뿐),
+  아주 긴 응답이 우연히 나오면 여전히 재현될 수 있다는 점은 남아있는 리스크로 기록.
+- 영향받는 범위: `src/state-machine/useConversationMachine.ts`(`SYSTEM_PROMPT`,
+  `runSendCycle`의 `streamClaudeResponse` 호출). 부수 효과: 지금까지 미사용이었던 서버의
+  프롬프트 캐싱 경로(`api/claude-stream.ts`의 `cache_control: ephemeral`)가 이번에 처음으로
+  실제 사용됨(CLAUDE.md 8장 비용 통제 원칙 2번).

@@ -12,6 +12,7 @@ const STATUS_LABEL: Record<string, string> = {
   user_speaking: '발화 인식 중',
   sending: '전송 중… (Claude 응답 대기)',
   streaming: 'AI 응답 스트리밍 중…',
+  assistant_speaking: 'AI가 말하는 중… (마이크 꺼짐)',
   error: '오류',
 }
 

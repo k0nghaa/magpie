@@ -86,6 +86,41 @@ async function testReducer() {
   state = conversationReducer(state, { type: 'ENGINE_ERROR', error: { reason: 'unknown' } })
   state = conversationReducer(state, { type: 'TEXT_SUBMITTED', text: '에러 상태에서 보냄' })
   assert(state.status === 'error', 'error 상태에서 TEXT_SUBMITTED는 무시됨(불가능한 전이 차단)')
+
+  // Day 5: streaming → assistant_speaking → listening (TTS 재생 사이클)
+  state = conversationReducer(state, { type: 'RESET' })
+  state = conversationReducer(state, { type: 'TEXT_SUBMITTED', text: '오늘 날씨 어때?' })
+  state = conversationReducer(state, { type: 'STREAM_STARTED' })
+  assert(state.status === 'streaming', 'sending에서 STREAM_STARTED → streaming')
+
+  state = conversationReducer(state, { type: 'STREAM_DELTA', text: '오늘은' })
+  state = conversationReducer(state, { type: 'STREAM_DELTA', text: ' 맑습니다' })
+  assert(state.assistantText === '오늘은 맑습니다', 'STREAM_DELTA가 순서대로 누적됨')
+
+  state = conversationReducer(state, { type: 'STREAM_DONE' })
+  assert(
+    state.status === 'assistant_speaking' && state.transcript === '',
+    'streaming에서 STREAM_DONE → assistant_speaking(바로 listening 아님), transcript 비움',
+  )
+
+  state = conversationReducer(state, { type: 'INTERIM_RESULT', text: '마이크가 켜져있으면 안 됨' })
+  assert(state.status === 'assistant_speaking', 'assistant_speaking에서 INTERIM_RESULT는 무시됨(마이크는 꺼져 있어야 함)')
+
+  state = conversationReducer(state, { type: 'SILENCE_TIMEOUT' })
+  assert(state.status === 'assistant_speaking', 'assistant_speaking에서 SILENCE_TIMEOUT은 무시됨')
+
+  state = conversationReducer(state, { type: 'ASSISTANT_SPEECH_DONE' })
+  assert(
+    state.status === 'listening' && state.assistantText === '오늘은 맑습니다',
+    'assistant_speaking에서 ASSISTANT_SPEECH_DONE → listening, assistantText는 다음 STREAM_STARTED까지 보존',
+  )
+
+  state = conversationReducer(state, { type: 'ASSISTANT_SPEECH_DONE' })
+  assert(state.status === 'listening', 'listening에서 ASSISTANT_SPEECH_DONE은 무시됨(불가능한 전이 차단)')
+
+  state = conversationReducer(state, { type: 'RESET' })
+  state = conversationReducer(state, { type: 'ASSISTANT_SPEECH_DONE' })
+  assert(state.status === 'idle', 'idle에서 ASSISTANT_SPEECH_DONE은 무시됨(불가능한 전이 차단)')
 }
 
 async function testSilenceTimer() {

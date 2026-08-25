@@ -7,6 +7,9 @@ import type { ConversationStatus } from '../../state-machine/types.ts'
 const LABEL: Partial<Record<ConversationStatus, string>> = {
   sending: 'Claude에게 응답을 요청하는 중…',
   streaming: 'AI 응답을 스트리밍으로 받는 중…',
+  // Day 5: TTS 재생 중 마이크가 꺼져 있다는 것을 시각적으로도 알린다(PRD 6장 "재생 중 마이크
+  // mute + 시각 표시").
+  assistant_speaking: 'AI가 답변을 말하는 중… (마이크 꺼짐)',
 }
 
 interface StreamingIndicatorProps {

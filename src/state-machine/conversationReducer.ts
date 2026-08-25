@@ -69,12 +69,12 @@ export function conversationReducer(
       }
       return state
 
-    // 스트리밍 완료 → listening으로 복귀(PRD 6장 streaming → assistant_speaking → listening 중
-    // assistant_speaking은 이번 단계에서 생략하기로 확인받음, docs/log/DECISIONS.md 참고).
+    // 스트리밍 완료 → assistant_speaking으로 전이(PRD 6장 streaming → assistant_speaking →
+    // listening). TTS 재생이 끝난 뒤에야 listening으로 복귀한다(ASSISTANT_SPEECH_DONE 참고).
     // transcript는 다음 사용자 턴을 위해 비운다.
     case 'STREAM_DONE':
       if (state.status === 'streaming') {
-        return { ...state, status: 'listening', transcript: '' }
+        return { ...state, status: 'assistant_speaking', transcript: '' }
       }
       return state
 
@@ -82,6 +82,14 @@ export function conversationReducer(
     case 'STREAM_ERROR':
       if (state.status === 'sending' || state.status === 'streaming') {
         return { ...state, status: 'error', error: event.error }
+      }
+      return state
+
+    // TTS 재생 종료 → listening 복귀(PRD 6장 assistant_speaking → listening). assistant_speaking
+    // 에서만 의미가 있다 — 다른 상태에서는 무시(기존 원칙과 동일한 불가능한 전이 차단).
+    case 'ASSISTANT_SPEECH_DONE':
+      if (state.status === 'assistant_speaking') {
+        return { ...state, status: 'listening' }
       }
       return state
 
