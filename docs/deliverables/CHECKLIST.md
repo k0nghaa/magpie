@@ -3,7 +3,7 @@
 > PRD 12장을 그대로 가져온 진행 상태 트래킹용 문서. 완료되는 대로 체크한다.
 
 - [ ] 동작하는 웹앱 (배포 링크): 
-- [ ] 상태 갤러리 디버그 라우트 (모든 상태를 한 화면에서 확인 가능)
+- [x] 상태 갤러리 디버그 라우트 (핵심 상태 6종 축소 버전, `docs/deliverables/COMPONENT.md` 6장)
 - [ ] 컴포넌트 문서 (`docs/deliverables/COMPONENT.md`)
 - [ ] 성능·접근성 리포트 (`docs/deliverables/PERFORMANCE_REPORT.md`)
 - [ ] 데모 녹화 5종
