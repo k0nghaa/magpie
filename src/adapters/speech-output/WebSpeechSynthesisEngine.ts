@@ -16,6 +16,16 @@ import type { SpeechOutputEngine } from '../types.ts'
 // 있음, 추측하지 않음), 실측으로 검증된 값보다 더 여유 있게 5초 간격으로 호출한다.
 const CHROME_RESUME_WORKAROUND_INTERVAL_MS = 5_000
 
+// 재생 중(paused=false)인데 resume()을 불러도 MDN 문서상 "이미 paused가 아니면 아무 효과 없는
+// 조건부 동작"으로 안전하다고 되어 있고, 실제로 5초 넘는 재생(약 6~8.5초)에서 resume()이 한 번씩
+// 걸리는 상황을 재현해 봐도 재생이 끊기거나 튀는 징후는 없었다(2026-08-25 실측). 그래도 굳이 매번
+// 불필요하게 부를 이유는 없어 `paused`일 때만 부르도록 방어적으로 가드한다.
+function resumeIfPaused(): void {
+  if (window.speechSynthesis.paused) {
+    window.speechSynthesis.resume()
+  }
+}
+
 export class WebSpeechSynthesisEngine implements SpeechOutputEngine {
   private canceledByCaller = false
 
@@ -28,11 +38,20 @@ export class WebSpeechSynthesisEngine implements SpeechOutputEngine {
 
     this.canceledByCaller = false
 
-    const resumeWorkaroundTimer = window.setInterval(() => {
-      window.speechSynthesis.resume()
-    }, CHROME_RESUME_WORKAROUND_INTERVAL_MS)
+    const resumeWorkaroundTimer = window.setInterval(resumeIfPaused, CHROME_RESUME_WORKAROUND_INTERVAL_MS)
 
     const utterance = new SpeechSynthesisUtterance(text)
+    // MDN 권장 사항 — 발음/음성 선택 정확도를 위해 lang을 명시한다. 지정 안 하면 빈 문자열로
+    // 남는 것을 실측으로 확인(추측 아님) — 이 환경은 getVoices()가 항상 빈 배열이라 JS에서
+    // 특정 보이스를 골라 지정할 방법은 없지만, lang 힌트 자체는 엔진에 그대로 전달된다.
+    // **하드코딩 — 언어별 확장 시 반드시 변경 필요**: PRD의 실제 목표는 영어→일본어→
+    // 스페인어→한국어(외국인 대상) 순으로 여러 언어를 지원하는 것이고, 지금 'ko-KR' 고정은
+    // 음성 스트리밍 파이프라인 자체를 테스트하기 편해서 임시로 택한 언어일 뿐이다(사람 확인,
+    // docs/log/DECISIONS.md 참고). 다국어를 실제로 붙일 땐 이 값과 `SYSTEM_PROMPT`/
+    // `FIXED_GREETINGS`(useConversationMachine.ts), STT 쪽 `SpeechRecognition.lang`
+    // (WebSpeechInputEngine.ts, 지금은 브라우저 기본값에 맡겨져 있어 이것도 함께 손봐야 함)을
+    // 전부 같은 언어로 맞춰야 한다.
+    utterance.lang = 'ko-KR'
     utterance.onend = () => {
       window.clearInterval(resumeWorkaroundTimer)
       onEnd()
