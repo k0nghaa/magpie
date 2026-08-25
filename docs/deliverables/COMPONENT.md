@@ -32,12 +32,12 @@
   규칙을 각 이벤트 케이스 안에 명시적으로 적을 수 있어 원천 차단이 코드로 드러난다
   (`src/state-machine/conversationReducer.ts`의 각 `case`가 `if (state.status === ...)`로
   가드하는 방식).
-- **이번 단계에서 구현한 상태(5개, 사람 확인 후 결정)**: `idle` / `listening` / `user_speaking` /
-  `sending` / `error`. PRD 6장의 `assistant_speaking`/`streaming`은 TTS(Day 5)/LLM 스트리밍
-  (Day 4) 어댑터가 아직 없어 지금 만들면 실제로 도달·테스트되지 않는 상태가 되므로 이번 단계
-  범위에서 제외(`docs/log/DECISIONS.md` 참고) — 해당 어댑터가 생기는 날 `conversationReducer`에
-  상태/이벤트를 추가한다(기존 케이스에 영향 없음, `switch` 구조이므로).
-- **상태 다이어그램(이번 단계 구현 범위)**:
+- **구현된 상태(6개)**: `idle` / `listening` / `user_speaking` / `sending` / `streaming` / `error`.
+  `streaming`은 Day 4에서 LLM 스트리밍 연동과 함께 추가했다. PRD 6장의 `assistant_speaking`은
+  TTS(`SpeechOutputEngine`)가 생기는 Day 5까지 계속 제외한다 — 지금 추가하면 실제로
+  도달·검증되지 않는 상태가 되기 때문(사람 확인 후 결정, `docs/log/DECISIONS.md` 참고). Day 5에
+  `streaming → assistant_speaking → listening`으로 확장할 예정.
+- **상태 다이어그램(현재 구현 범위)**:
   ```
   idle --START_LISTENING--> listening
   listening --INTERIM_RESULT--> user_speaking (transcript 갱신)
@@ -46,12 +46,19 @@
   user_speaking --RESUME_SPEAKING(이어서 말하기)--> listening (transcript 보존)
   sending --RESUME_SPEAKING(이어서 말하기)--> listening (transcript 보존)
   (idle|listening|user_speaking) --TEXT_SUBMITTED(텍스트 전송/Enter)--> sending
+  sending --STREAM_STARTED--> streaming
+  streaming --STREAM_DELTA(반복)--> streaming (assistantText 누적)
+  streaming --STREAM_DONE--> listening
+  (sending|streaming) --STREAM_ERROR--> error
   (모든 상태) --ENGINE_ERROR--> error
   error --START_LISTENING(재시도)--> listening
   (모든 상태) --RESET--> idle
   ```
-  `sending`은 이번 단계에서 종착점이다 — 실제 LLM 전송(Day 4)이 붙기 전까지는 여기서 더
-  진행하지 않는 게 맞는 동작이다(가짜로 다음 상태로 넘어가지 않음).
+  **참고**: `sending`은 리듀서 레벨에서는 실제로 거치는 상태이지만(단위 테스트로 결정론적으로
+  증명됨), `TEXT_SUBMITTED`/`SILENCE_TIMEOUT` 직후 같은 동기 흐름에서 곧바로 `STREAM_STARTED`가
+  디스패치되어 React 18+의 자동 배칭이 `sending → streaming`을 한 커밋으로 묶는다 — 그래서
+  화면에는 `sending`이 별도 프레임으로 안 보일 수 있다(버그 아님, 실행 근거는
+  `docs/log/DEVLOG.md` Day 4 항목 참고).
 - **무음 타이머(~1.2초) 위치와 판단 기준(둘 다 사람 확인 후 결정)**:
   - 위치: `WebSpeechInputEngine`(어댑터) 내부가 아니라 로직 레이어
     (`src/state-machine/silenceTimer.ts` + 이를 사용하는 `useConversationMachine.ts`)에 둠 —
@@ -79,6 +86,17 @@
   `TEXT_SUBMITTED` 이벤트를 발생시켜 무음 타이머 없이 바로 `sending`으로 전환한다 — PRD 4장이
   명시한 "전송 버튼/Enter가 곧 턴 종료 신호이므로 무음 감지 로직이 필요 없다"는 설계를 그대로
   구현. `WebSpeechInputEngine`을 전혀 참조하지 않는다(미지원 폴백이므로 애초에 쓸 대상이 없음).
+- **`StreamingIndicator`(스트리밍 중 표시, Day 4)**: `sending`/`streaming`에서만 렌더링 —
+  가시성 규칙을 컴포넌트 자체에 내장하는 `ResumeSpeakingButton`과 동일한 패턴. PRD 컴포넌트
+  목록에 별도의 "로딩 표시" 컴포넌트가 없어서, 응답 대기(`sending`)와 토큰 수신(`streaming`)을
+  문구만 다르게 하나의 컴포넌트로 묶었다.
+- **`ErrorBanner`(에러 + 재시도, Day 4)**: `state.error`가 있을 때만 렌더링. "재시도"는 실패한
+  요청을 자동으로 다시 보내지 않고 `useConversationMachine`의 기존 `stop()`(엔진 정지 + 스트림
+  abort + `RESET`)을 그대로 재사용해 `idle`로만 되돌린다 — 사용자 모르게 API가 한 번 더 나가는
+  것을 피하기 위한 선택(사람 확인 없이 결정, 낮은 리스크, `docs/log/DECISIONS.md` 참고).
+- **`EmptyState`(빈 화면, Day 4)**: `status === 'idle'`일 때만 렌더링. 리듀서상 `idle`은 초기
+  상태 또는 `RESET` 직후뿐이라 `transcript`/`assistantText`가 항상 비어 있으므로, 별도의
+  "내용이 비었는지" prop 없이 `status`만으로 판단해도 충분하다.
 - **엔진 의존성 주입**: `useConversationMachine(engineFactory)`가 엔진을 팩토리로 받는다(기본값
   `WebSpeechInputEngine`). PRD 3장의 "mock 구현으로 교체해도 상태머신이 무변경으로 동작하는지
   확인" 요구사항을 실제로 만족시키기 위한 설계 — 다른 `SpeechInputEngine` 구현체(mock, 나중엔
@@ -121,102 +139,33 @@
      받아 PRD 11장 스코프 축소(수동 버튼 방식)는 발동하지 않기로 함(사람 확인, 표본이 많지
      않으니 Day 6~7 데모 준비 중 추가 확인 권장).
 
-## 3-1. Day 4: LLM 스트리밍 연동 (`claudeProxy.ts` + 상태머신 확장)
+## 4. LLM 스트리밍 연동 설계 근거
 
-- **`ConversationStatus` 확장**: `sending → streaming → listening`을 추가했다.
-  `assistant_speaking`은 이번에도 제외했다(Day 3와 같은 논리 — TTS 어댑터가 아직 없어 지금
-  추가하면 실제로 도달·검증되지 않는 상태가 된다, 사람 확인 후 결정, `docs/log/DECISIONS.md`
-  참고). 갱신된 상태 다이어그램(이번 단계 구현 범위):
-  ```
-  (idle|listening|user_speaking) --TEXT_SUBMITTED / user_speaking --SILENCE_TIMEOUT-->
-    sending --STREAM_STARTED--> streaming --STREAM_DELTA(반복)--> streaming
-    streaming --STREAM_DONE--> listening
-    (sending|streaming) --STREAM_ERROR--> error
-  ```
-  **Day 4 DoD 재검증(2026-08-25)에서 확인된 사실**: `sending`은 리듀서 레벨에서 실제로
-  발생하지만(`verify:silence-timer`의 "TEXT_SUBMITTED → 바로 sending" 등으로 결정론적으로
-  증명됨), 화면(DOM)에는 별도 프레임으로 그려지지 않는다 — `TEXT_SUBMITTED`/`SILENCE_TIMEOUT`
-  디스패치 직후 같은 동기 실행 흐름 안에서 곧바로 `STREAM_STARTED`가 디스패치돼 React 18+의
-  자동 배칭이 `sending → streaming` 두 업데이트를 한 커밋으로 묶기 때문이다. 버그가 아니라
-  응답이 그만큼 빠르다는 뜻이며, `docs/log/DEVLOG.md`의 Day 4 DoD 검증 항목에 MutationObserver
-  기반 타임라인으로 기록해뒀다.
-- **`claudeProxy.ts` 설계**: `api/claude-stream.ts`가 Anthropic SDK 원본 이벤트를 그대로
-  `data: {...}\n\n`로 중계하고 `[DONE]`으로 끝난다는 걸 서버 코드를 직접 읽어 확인한 뒤, 그
-  형식에만 맞춰 fetch+`ReadableStream`으로 파싱했다(MDN 기준, 청크 경계 버퍼링 포함) — 상세
-  근거는 `docs/rules/ARCHITECTURE.md`. 클라이언트는 `/api/claude-stream`만 호출하고
-  `ANTHROPIC_API_KEY`는 존재조차 참조하지 않는다(코드 검색으로 자체 점검, 프로덕션 빌드
-  `dist/`에도 키 값이 없음을 확인).
-- **버그 발견 및 수정 — `useEffect`로 스트리밍을 트리거하면 자기 자신을 취소함**: 처음엔
-  `state.status === 'sending'`을 `useEffect(deps: [state.status])`로 감지해 LLM 호출을
-  트리거했는데, 그 안에서 `dispatch(STREAM_STARTED)`가 `status`를 바꾸는 순간 React가 같은
-  effect를 cleanup(→ 방금 만든 `AbortController.abort()`) 후 재실행해 방금 보낸 요청을 스스로
-  취소해버렸다. Playwright로 `net::ERR_ABORTED`를 실제로 확인 후, `start()`/`stop()`과 동일한
-  기존 패턴(이벤트가 발생하는 자리에서 직접 함수 호출)으로 바꿔 해결했다. 상세 원인 분석은
+`claudeProxy.ts`는 "상태관리"도 아니고 PRD 7장이 정의한 3개 어댑터(`SpeechInputEngine`/
+`SpeechOutputEngine`/`ReminderEngine`)도 아닌 별도 관심사(LLM 프록시 클라이언트 — ARCHITECTURE.md
+분류상 로직 레이어)라 독립된 장으로 둔다.
+
+- **`claudeProxy.ts`의 역할과 경계**: `api/claude-stream.ts`(Vercel Serverless Function)가
+  내려주는 SSE 형식(Anthropic SDK 원본 이벤트를 `data: {...}\n\n`로 중계, `[DONE]`으로 종료)에
+  맞춰 fetch+`ReadableStream` 파싱만 담당한다. `ANTHROPIC_API_KEY`는 존재조차 참조하지 않아
+  "API 키는 서버만 다룬다"는 경계(PRD 5장)를 그대로 지킨다. 형식 확인 방법과 파싱 구현 상세는
   `docs/rules/ARCHITECTURE.md` 참고.
-- **대화 히스토리 윈도잉**: 상태머신(리듀서) 밖, `useConversationMachine`의 `historyRef`에
-  최근 대화를 쌓아두고, 매 전송마다 최근 `HISTORY_WINDOW_TURNS`(=3턴, 메시지 6개)만 슬라이스해
-  요청에 포함한다(PRD 8장 비용 통제 원칙). N=3은 사람 확인 후 결정했고, 상수 하나만 바꾸면
-  5턴으로 쉽게 조정 가능하게 만들었다(`docs/log/DECISIONS.md` 참고).
-- **로컬 개발 환경**: `npm run dev`(Vite)는 Vercel Serverless Function을 못 띄우므로,
-  `scripts/dev-api-server.ts`(Day 1의 `verify-claude-stream.ts`와 동일한 "핸들러를 Node http로
-  감싸기" 패턴의 상주판) + `vite.config.ts`의 `server.proxy`로 `/api`를 그쪽에 연결했다. Vercel
-  계정 연동은 실제 배포 시점(Day 6~7)으로 미룸(Day 1 원칙과 일관, 사람 확인 후 결정).
-- **실제 실행 검증**:
-  1. 결정론적 검증(`npm run verify:claude-proxy`): 청크가 이벤트 JSON 한복판에서 잘려도 정상
-     조립되는지, 서버 에러 이벤트, HTTP 레벨 실패, `[DONE]` 없이 끊긴 경우, `AbortError`가
-     감싸지지 않고 그대로 전달되는지 — 5개 시나리오 총 8개 체크 전부 PASS.
-  2. Playwright(headless Chromium) + 실제 Claude API(로컬 프록시 경유): 텍스트 입력 경로와
-     마이크 경로(Day 3와 동일한 가짜 `SpeechRecognition` 생성자로 "발화 후 침묵" 재현) 양쪽
-     모두 `sending/streaming` 상태를 거쳐 실제 Claude 응답이 화면에 반영되고 `listening`으로
-     복귀함을 확인. AI 응답 문단이 한 번에 나타나지 않고 여러 타임스탬프에 걸쳐 점진적으로
-     길어지는 것까지 확인(진짜 토큰 스트리밍 증빙, 통짜 응답 아님). 페이지 에러 0건.
-  3. `npx tsc -b`, `npm run lint` 통과 — 다만 새로 경고 1건이 추가됐다(`useConversationMachine.ts`
-     의 `useRef(createSilenceTimer(handleSilenceTimeout))`를 "렌더 중 ref 접근"으로 오탐).
-     `createSilenceTimer`가 콜백을 `setTimeout` 안에서만 호출한다는 걸 코드로 확인했고(동기
-     호출 없음), Day 3부터 있던 기존 1건(effect cleanup에서 ref 접근)과 같은 성격의 정적 분석
-     오탐으로 판단해 코드 주석으로 근거를 남기고 그대로 둠(사람 확인 후 유지 결정과 동일한
-     기준 적용).
-  4. `npm run verify:silence-timer`(Day 3 회귀 스위트, 21개 케이스) 재실행 — 전부 PASS, 기존
-     idle/listening/user_speaking/sending/error 전이 회귀 없음 확인.
+- **에러 타입 재사용**: `ClaudeStreamError`는 별도 taxonomy를 새로 만들지 않고 `SpeechInputError`
+  를 그대로 구현한다 — `ConversationMachineState.error` 슬롯 하나로 마이크/LLM 에러를 함께
+  다루기 위함(근거: `docs/log/DECISIONS.md`).
+- **스트리밍 트리거는 이벤트 발생 지점에서 직접 호출**: `state.status === 'sending'`을
+  `useEffect`로 감지해 트리거하면, 그 안의 `dispatch(STREAM_STARTED)`가 자기 자신의 의존성을
+  바꿔 React가 effect를 cleanup(→ 방금 만든 요청을 abort)했다가 재실행하는 자기 취소 문제가
+  생긴다. `start()`/`stop()`과 동일하게 `SILENCE_TIMEOUT`/`TEXT_SUBMITTED`가 발생하는 자리에서
+  직접 `runSendCycle()`을 호출하는 방식으로 설계했다(원인 분석은 `docs/rules/ARCHITECTURE.md`
+  참고).
+- **대화 히스토리 윈도잉**: 상태머신(리듀서) 밖, `useConversationMachine`의 `historyRef`에 최근
+  대화를 쌓아두고 매 전송마다 최근 `HISTORY_WINDOW_TURNS`(=3턴)만 슬라이스해 요청에 포함한다
+  (PRD 8장 비용 통제 원칙). 리듀서가 아니라 hook에 둔 이유: "지금 화면 상태가 뭔지"(상태머신의
+  책임)와 "서버로 보낼 메시지 목록"(비용 통제 관심사)은 서로 다른 관심사라서 분리했다. N=3의
+  근거는 `docs/log/DECISIONS.md` 참고.
 
-## 3-2. Day 4 후속: `StreamingIndicator` / `ErrorBanner` / `EmptyState`
-
-- **가시성 규칙을 컴포넌트 자체에 내장**: `ResumeSpeakingButton`(Day 3)과 동일한 패턴 —
-  `StreamingIndicator`는 `status`가 `sending`/`streaming`일 때만, `EmptyState`는 `idle`일 때만
-  렌더링을 스스로 결정한다. `EmptyState`가 `status === 'idle'`만 보고 판단해도 되는 이유:
-  리듀서상 `idle`은 초기 상태 또는 `RESET` 직후뿐이고, 두 경우 모두 `transcript`/`assistantText`
-  가 항상 비어 있다(`conversationReducer.ts`) — 그래서 별도로 "내용이 비어 있는지"를 확인하는
-  prop 없이 `status`만으로 충분하다.
-- **`StreamingIndicator`가 `sending`도 포함하는 이유**: PRD 컴포넌트 목록에 별도의 "로딩 표시"
-  컴포넌트가 없다. `sending`(요청을 보내고 첫 토큰을 기다리는 중)과 `streaming`(토큰 수신 중)은
-  사용자 입장에서 둘 다 "AI가 작업 중"이라는 같은 의미라 하나의 컴포넌트로 묶고 문구만
-  구분했다(Day 4 지시사항의 "로딩·에러·빈 화면 컴포넌트 완성"에서 "로딩"에 해당).
-- **`ErrorBanner`의 "재시도"는 자동 재전송이 아니라 idle 복귀**: 사람 확인 없이 결정(낮은
-  리스크) — 근거는 `docs/log/DECISIONS.md` 2026-08-25 항목. `onRetry`에 `useConversationMachine`
-  이 이미 갖고 있던 `stop()`(엔진 정지 + 스트림 abort + `RESET` 디스패치)을 그대로 넘겨써서 새
-  코드 없이 해결했다.
-- **부수적으로 발견한 버그**: 텍스트 폴백 모드에서 LLM 스트리밍이 실패해 `error` 상태가 되면,
-  리듀서가 `error`에서의 `TEXT_SUBMITTED`를 무시하도록 돼 있어(불가능한 전이 차단) 사용자가
-  아무리 다시 입력해도 반응이 없는 복구 불가 상태였다 — `ErrorBanner`를 만들면서 발견, 재시도
-  버튼이 idle로 되돌려주는 것으로 함께 해결됨.
-- **실제 실행 검증(Playwright)**:
-  1. `EmptyState`: 첫 진입(idle) 시 노출, `error` 상태 진입 시 숨겨짐, 재시도로 idle 복귀 시
-     다시 노출됨을 확인.
-  2. `ErrorBanner` + 네트워크 끊김 재현: Playwright 공식 API `page.route(url, route =>
-     route.abort())`로 `/api/claude-stream` 요청을 실제로 실패시켜 재현(브라우저 devtools
-     오프라인 토글과 동일한 효과를 코드로 결정론적으로 재현하는 공식 방법 — 지어낸 방법 아님).
-     `ErrorBanner`가 노출되고 사유가 정확히 `network`로 분류됨을 확인. 이 과정에서 순수 fetch
-     레벨 실패(TypeError)가 원래 `unknown`으로 잘못 분류되던 것을 발견해 `claudeProxy.ts`를
-     고치고(`fetch()` 자체의 실패를 `network`로 매핑) `verify:claude-proxy`에 회귀 케이스 추가.
-  3. 재시도 클릭 → idle 복귀 + `EmptyState` 재노출 확인 → `page.unroute()`로 네트워크 복구 후
-     재입력 → 실제 Claude 스트리밍 응답까지 정상 완주(자동 재전송이 아니라 사용자가 다시
-     시도한 것임을 그대로 보여줌).
-  4. `StreamingIndicator` 문구가 `sending`/`streaming` 동안 노출됨을 확인.
-  5. 마이크 경로(Day 3와 동일한 가짜 `SpeechRecognition`)로도 회귀 없이 정상 동작 재확인.
-  6. `npm run verify:claude-proxy`(신규 케이스 포함 총 6개 시나리오), `verify:silence-timer`
-     모두 PASS, `npx tsc -b`/`npm run lint` 통과(경고는 Day 4에서 문서화한 기존 2건과 동일).
-
-## 4. 어댑터 분리 설계 근거
+## 5. 어댑터 분리 설계 근거
 
 ### `SpeechInputEngine` → `WebSpeechInputEngine` (Day 3)
 
@@ -365,11 +314,11 @@
   만들지 않기 위한 선택, 사용자 확인 후 결정 (`docs/log/DECISIONS.md` 참고). Day 3+에서
   `ConversationScreen`이 생기면 `handleStartNow`를 실제 네비게이션으로 교체해야 함.
 
-## 5. 상태 갤러리 라우트
+## 6. 상태 갤러리 라우트
 
 - 링크/경로: 
 - 커버하는 상태 목록: idle / listening / streaming / error / empty / 권한거부 등
 
-## 6. MVP vs 스트레치 스코프 판단 근거
+## 7. MVP vs 스트레치 스코프 판단 근거
 
 *(작성 예정 — 실제로 무엇을 자르거나 유지했는지, `docs/log/DECISIONS.md` 링크)*
