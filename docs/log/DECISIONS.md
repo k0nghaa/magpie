@@ -498,3 +498,33 @@
   기준으로 판단한다. Day 7 데모 자료 수집 항목, `docs/deliverables/CHECKLIST.md`의 "데모
   녹화 5종" 항목(발표 시 3종만 첨부하고 사유를 이 문서로 링크). 오탐 복구/스크린리더 관련
   기능 코드는 변경하지 않음 — 녹화 증빙만 생략.
+
+### 2026-08-25 Day 6: 상태 갤러리 디버그 라우트 — 7개 상태가 아니라 6개 카드로 축소
+
+- 배경/문제: PRD 6장 원문은 상태 갤러리가 "idle/listening/streaming/error/empty/권한거부 등
+  모든 상태"를 다 보여주길 요구하고, 위 "Day 6~7 스코프 축소" 결정도 "7개 상태 전부가 아니라
+  핵심 상태 위주로 축소해서 구현"이라고만 방향을 정해뒀을 뿐 구체적으로 어떤 상태를 뺄지는
+  정하지 않았다. 실제로 만들면서 두 가지를 결정해야 했다: (1) `ConversationStatus` 7개
+  (`idle`/`listening`/`user_speaking`/`sending`/`streaming`/`assistant_speaking`/`error`) 중
+  일부를 뺄지, (2) PRD가 별도로 언급한 "empty"를 "idle"과 다른 카드로 만들지.
+- 검토한 대안:
+  1. (상태 선정) (A) 7개 상태 모두 카드로 만든다. (B) `user_speaking`/`sending`을 빼고
+     5개만 만든다 — 실사용 흐름에서 찰나에 지나가는 전이 상태라, 시간 예산 안에서 만들어도
+     증빙 가치가 낮다고 판단.
+  2. (idle vs empty) (A) `idle` 카드와 `empty` 카드를 시각적으로 다르게 두 개 만든다(PRD 문구를
+     문자 그대로 따름). (B) 한 카드로 합친다 — `EmptyState.tsx` 설계상 `status === 'idle'`이면
+     항상 `messages`/`transcript`가 비어 있어서(초기 상태이거나 `RESET` 직후뿐), 이 앱에서
+     "idle"과 "대화 없음(빈 화면)"은 실제로 항상 동시에 나타나는 같은 화면이다.
+- 결정: 1번은 (B), 2번은 (B). 최종 카드 6개: `idle/empty(빈 화면)`, `listening`, `streaming`,
+  `assistant_speaking`, `error`, `권한거부(NotificationSetup)`.
+- 이유: 사람 확인받음("user_speaking, sending은 전환 찰나의 상태라 생략해도 무방하다고
+  판단되면 그렇게 하고, 판단 근거를 알려달라"는 요청에 따라 판단 근거를 함께 제시하고 그대로
+  채택됨). `user_speaking`/`sending`을 빼도 그 상태의 `TurnIndicator` 라벨 문구 자체는 코드
+  (`STATUS_LABEL`)로 바로 확인 가능하고, 실제 키보드 접근성 검증 과정에서 `user_speaking`
+  상태("발화 인식 중…")가 실제로 정상 동작함을 별도로 재확인했다(`docs/deliverables/
+  COMPONENT.md` 8장 참고). idle/empty를 합친 것은 실제로 다른 UI가 없는데 인위적으로 다르게
+  보여주는 것이 정직하지 않다고 판단한 것 — 스코프 축소가 아니라 정확성의 문제로 봄.
+- 영향받는 범위: `src/components/StateGallery/StateGallery.tsx`(신규),
+  `src/GalleryRoot.tsx`(신규), `src/isGalleryRoute.ts`(신규), `src/main.tsx`(라우트 분기),
+  `docs/deliverables/COMPONENT.md` 6장(상세 근거), `docs/deliverables/CHECKLIST.md`("상태
+  갤러리 디버그 라우트" 항목 체크).

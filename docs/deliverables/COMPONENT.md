@@ -428,10 +428,94 @@
   이미 `messages`에 반영된 응답이 실시간 말풍선으로 한 번 더 그려지는 중복 버그도 함께 수정.
   둘 다 `docs/log/DECISIONS.md` 참고.
 
-## 6. 상태 갤러리 라우트
+## 6. 상태 갤러리 라우트 (Day 6, 축소 버전)
 
-- 링크/경로: 
-- 커버하는 상태 목록: idle / listening / streaming / error / empty / 권한거부 등
+- **경로**: 개발 서버(`npm run dev`)에서 `http://localhost:5173/?gallery=1`. `import.meta.env.DEV`
+  가드가 있어 `npm run build` 산출물에서는 접근 경로 자체가 없다(청크는 다른 화면과 같은 lazy
+  패턴으로 분리되지만 fetch되는 경로가 없음). 구현: `src/main.tsx`(라우트 분기) +
+  `src/GalleryRoot.tsx`(lazy 경계) + `src/components/StateGallery/StateGallery.tsx`(카드 6개).
+- **`App` 안이 아니라 `main.tsx`에서 분기한 이유**: `App`은 이미 `useState`/`useEffect`를 쓰고
+  있어서, 그 훅들보다 앞에서 조건부로 `return`하면 Rules of Hooks를 어기게 된다(다른 렌더에서
+  훅 호출 개수가 달라짐) — 아예 `App`이 렌더 트리에 들어가기 전, 엔트리 파일에서 갈라놓았다.
+- **강제 렌더링 방식**: 실제 상태머신(`useConversationMachine`)이나 어댑터를 거치지 않고,
+  `ConversationScreen`이 쓰는 프레젠테이션 컴포넌트(`TurnIndicator`/`EmptyState`/
+  `ChatMessageList`/`StreamingIndicator`/`ResumeSpeakingButton`/`ErrorBanner`)에 손으로 만든
+  상태 값을 직접 주입한다. `ConversationScreen.tsx`의 레이아웃을 그대로 옮겨 적은 것이라
+  레이아웃이 바뀌면 갤러리도 같이 갱신해야 하는 유지보수 부담이 있음 — 개발 전용 디버그
+  라우트라 감수하기로 결정.
+- **커버하는 상태 6장(카드)**: `idle / empty(빈 화면)`, `listening`, `streaming`,
+  `assistant_speaking`, `error`, `권한거부(NotificationSetup)`.
+  - **idle과 empty를 한 카드로 합친 이유**: `EmptyState.tsx` 설계상 `status === 'idle'`이면
+    항상 `messages`/`transcript`가 비어 있다(초기 상태이거나 `RESET` 직후뿐이라서) — 이 앱에서
+    "idle"과 "대화 없음(빈 화면)"은 항상 동시에 나타나는 같은 화면이라, 인위적으로 다른 모습으로
+    쪼개 보여주는 건 정직하지 않다고 판단했다.
+  - **user_speaking/sending을 뺀 이유**: 실사용 흐름에서 찰나에 지나가는 전이 상태다
+    (user_speaking은 사용자가 말하는 동안만, sending은 요청을 보내고 첫 응답을 받기 전까지의
+    아주 짧은 순간만 유지). 레이아웃은 listening/streaming과 사실상 같고 `TurnIndicator` 라벨
+    문구만 다른데, 그 문구 자체는 코드(`TurnIndicator.tsx`의 `STATUS_LABEL`)로 바로 확인
+    가능해서, 축소된 시간 예산 안에서 별도 카드를 만들어도 얻는 증빙 가치가 낮다고 판단했다.
+  - **`권한거부(NotificationSetup)` 카드**: `ConversationScreen`의 상태가 아니라
+    `NotificationSetup`의 알림 권한 차단 화면이다(PRD 4장 예외 시나리오). 실제 `NotificationSetup`
+    컴포넌트를 마크업 복제 없이 그대로 렌더링하기 위해, 갤러리가 마운트된 동안만
+    `Notification.permission`을 `'denied'`로 오버라이드하고 언마운트 시 원상복구한다
+    (`useForceNotificationPermissionDenied`, 개발 전용 트릭).
+- **실제 실행 검증(Playwright)**:
+  1. 6개 카드 전부 콘솔 에러 0건으로 렌더링 확인(스크린샷 보존).
+  2. `axe-core`(WCAG2A+AA)로 `NotificationSetup`(기본 상태)과 갤러리 전체를 검사 —
+     명도 대비 포함 **위반 0건**.
+  3. 각 카드의 `[aria-live]`/`[role="alert"]` 텍스트를 DOM에서 직접 읽어 실제 상태별 문구가
+     정확히 매칭되는지 확인(아래 8장 접근성 절 참고) — devtools 접근성 트리 확인에 준하는
+     자동화 검증이며, 실제 스크린리더(NVDA/VoiceOver) 음성 출력 자체를 들은 것은 아니다.
+
+## 8. 접근성 수동 점검 (Day 6)
+
+- **키보드만으로 전체 플로우 조작**: `Tab`/`Enter`만 사용해 두 경로 모두 완주 확인(Playwright,
+  마우스 클릭 이벤트 없이 키보드 이벤트만 사용).
+  - 마이크 지원 경로: 알림 설정(권한거부) → `Tab`→`Enter`로 "지금 시작하기" → `listening` 진입
+    → (가짜 발화 인식 주입) → `user_speaking` → `Tab`→`Enter`로 "이어서 말하기" → `listening`
+    복귀 → `Tab`→`Enter`로 "대화 종료" → 설정 화면 복귀.
+  - 텍스트 폴백 경로(마이크 미지원): 알림 설정(권한거부) → "지금 시작하기" → 텍스트 입력창
+    자동 노출 → `Tab`으로 입력창 포커스 → 타이핑 → `Enter` 전송 → (로컬 환경엔 API 백엔드가
+    없어 네트워크 오류로 귀결 — PRD 4장 "네트워크 오류 → 재시도 버튼" 예외 UI를 그대로 검증하는
+    경로가 됨) → `Tab`→`Enter`로 "재시도" → idle 복귀 → `Tab`→`Enter`로 "대화 종료".
+  - 두 경로 모두 키보드 트랩 없음, 포커스 이동 순서가 시각적 순서와 일치, 모든 인터랙티브
+    요소가 네이티브 `<button>`/`<input>`/`<form>`이라 별도 `tabindex`/키보드 핸들러 없이 기본
+    브라우저 동작만으로 접근 가능함을 확인. `ResumeSpeakingButton`도 동일한 네이티브 `<button>`
+    패턴이라 구조적으로 같은 근거가 적용된다.
+  - 포커스 링(outline)을 지우는 CSS가 코드베이스 어디에도 없음을 확인(`outline`/`focus` 관련
+    커스텀 스타일 grep 결과 0건) — 브라우저 기본 포커스 표시가 그대로 보인다.
+- **7개 상태의 `aria-live` 전달 정확성**: 실제 스크린리더(NVDA/VoiceOver) 음성 출력을 들은 것은
+  아니고, 상태 갤러리에서 각 카드의 `[aria-live]`/`[role="alert"]` 엘리먼트 텍스트를 DOM
+  레벨에서 확인했다(devtools 접근성 트리 조회에 준하는 방법, 정직하게 그 한계를 기록).
+  결과 — 상태별로 의도한 문구가 정확히 붙어 있음을 확인:
+  - `idle`: "대기 중" (polite)
+  - `listening`: "듣는 중…" (polite)
+  - `streaming`: "AI가 생각하는 중…" (polite) + "AI 응답을 스트리밍으로 받는 중…" (polite)
+  - `assistant_speaking`: "AI가 말하는 중… (마이크 꺼짐)" (polite) + "AI가 답변을 말하는 중…
+    (마이크 꺼짐)" (polite)
+  - `error`: "오류" (polite, `TurnIndicator`) + "오류가 발생했습니다: ... 재시도" (**assertive**,
+    `role="alert"`, `ErrorBanner`) — 에러만 assertive로 즉시 끼어들도록 되어 있어 우선순위가
+    올바르게 설계되어 있음을 확인.
+  - 권한거부(`NotificationSetup`): "알림이 차단되었습니다..." (polite)
+  - `user_speaking`/`sending`은 갤러리에서 별도 카드로 만들지 않았지만, `TurnIndicator`의
+    `STATUS_LABEL` 매핑(코드)으로 각각 "발화 인식 중…"/"전송 중…"이 붙는 것을 확인했고,
+    실제 키보드 플로우 테스트 중에도 "발화 인식 중…"이 정상적으로 나타남을 재확인했다(위
+    키보드 플로우 절 참고).
+  - **발견 사항(수정 안 함, 낮은 우선순위로 보고)**: `error` 상태에 진입하면 `TurnIndicator`의
+    "오류"(polite)와 `ErrorBanner`의 상세 메시지(assertive)가 동시에 렌더링되어 스크린리더가
+    두 영역을 모두 읽어(다소 중복). 기능적 오류는 아니고(오히려 assertive 쪽이 우선 끼어들어
+    핵심 정보 전달엔 문제 없음), "오류" 한 단어와 상세 메시지가 겹쳐 약간 장황해지는 수준이라
+    이번 축소 스코프에서는 손대지 않고 사람에게 보고만 한다. 고치려면 `TurnIndicator`가
+    `error` 상태일 때 자기 라벨을 렌더링하지 않도록(`ErrorBanner`가 이미 다 말해주므로) 분기를
+    추가하면 된다.
+- **명도 대비**: `axe-core`(`color-contrast` 규칙 포함 WCAG2A+AA 전체)로 `NotificationSetup`
+  기본 상태 + 상태 갤러리(6개 카드, `NotificationSetup` 차단 상태 포함) 전체를 자동 검사 —
+  **위반 0건**. Lighthouse Accessibility 점수(2단계에서 이미 측정)도 전/후 모두 100/100으로
+  일치하는 결과.
+- **음성 미지원 브라우저 텍스트 모드 자동 전환**: 위 키보드 플로우(텍스트 폴백 경로)에서
+  `SpeechRecognition`/`webkitSpeechRecognition` 생성자를 제거해 재현 — 마이크 UI 없이
+  `TextInputFallback`이 자동으로 노출됨을 확인(Day 3에서 이미 검증된 것을 이번 키보드
+  시나리오에서 재확인).
 
 ## 7. MVP vs 스트레치 스코프 판단 근거
 

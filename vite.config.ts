@@ -2,6 +2,7 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { VitePWA } from 'vite-plugin-pwa'
+import { visualizer } from 'rollup-plugin-visualizer'
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -32,6 +33,14 @@ export default defineConfig({
         enabled: true,
         type: 'module',
       },
+    }),
+    // Day 6 성능 작업: 코드 스플리팅 전/후 번들 트리맵 비교용 (docs/rules/PRD.md 6장).
+    // `npm run build`마다 dist/bundle-stats.html로 트리맵을 생성한다 — 전/후 캡처 후
+    // docs/deliverables/bundle-treemap-{before,after}.html로 복사해 보존한다.
+    visualizer({
+      filename: 'dist/bundle-stats.html',
+      gzipSize: true,
+      brotliSize: true,
     }),
   ],
 })

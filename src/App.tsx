@@ -1,6 +1,10 @@
-import { useEffect, useState } from 'react'
-import ConversationScreen from './components/ConversationScreen/ConversationScreen.tsx'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import NotificationSetup from './components/NotificationSetup/NotificationSetup.tsx'
+
+// Day 6 코드 스플리팅(docs/rules/PRD.md 6장): `NotificationSetup` 진입 시 아직 필요 없는
+// `ConversationScreen` 트리를 별도 청크로 분리한다 — Web Speech API 자체는 번들 무게가
+// 없으므로 실질 최적화 대상은 이 컴포넌트 트리.
+const ConversationScreen = lazy(() => import('./components/ConversationScreen/ConversationScreen.tsx'))
 
 type Screen = 'setup' | 'conversation'
 
@@ -36,7 +40,11 @@ function App() {
     <main className="flex min-h-svh flex-col items-center justify-center gap-6">
       <h1 className="text-2xl font-medium">Magpie PoC</h1>
       {screen === 'setup' && <NotificationSetup onStartConversation={() => setScreen('conversation')} />}
-      {screen === 'conversation' && <ConversationScreen onEnd={() => setScreen('setup')} />}
+      {screen === 'conversation' && (
+        <Suspense fallback={<p aria-live="polite">대화 화면을 불러오는 중...</p>}>
+          <ConversationScreen onEnd={() => setScreen('setup')} />
+        </Suspense>
+      )}
     </main>
   )
 }
