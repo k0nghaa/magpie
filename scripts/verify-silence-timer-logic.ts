@@ -121,6 +121,20 @@ async function testReducer() {
   state = conversationReducer(state, { type: 'RESET' })
   state = conversationReducer(state, { type: 'ASSISTANT_SPEECH_DONE' })
   assert(state.status === 'idle', 'idle에서 ASSISTANT_SPEECH_DONE은 무시됨(불가능한 전이 차단)')
+
+  // Day 5 후속: PRD 4장 Happy Path 3번 — idle → GREETING_STARTED → assistant_speaking
+  state = conversationReducer(state, { type: 'RESET' })
+  state = conversationReducer(state, { type: 'GREETING_STARTED', text: '좋은 아침이에요!' })
+  assert(
+    state.status === 'assistant_speaking' && state.assistantText === '좋은 아침이에요!' && state.transcript === '',
+    'idle에서 GREETING_STARTED → assistant_speaking, 고정 인사말이 assistantText에 반영됨',
+  )
+
+  state = conversationReducer(state, { type: 'ASSISTANT_SPEECH_DONE' })
+  assert(state.status === 'listening', '인사말 TTS 종료 후 ASSISTANT_SPEECH_DONE → listening (기존 이벤트 그대로 재사용)')
+
+  state = conversationReducer(state, { type: 'GREETING_STARTED', text: '이미 시작된 세션에서 다시?' })
+  assert(state.status === 'listening', 'idle이 아닌 상태에서 GREETING_STARTED는 무시됨(불가능한 전이 차단)')
 }
 
 async function testSilenceTimer() {

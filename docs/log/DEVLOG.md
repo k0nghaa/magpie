@@ -717,6 +717,83 @@
   목록을 채우는 후속 작업).
 - 이슈/메모: 없음.
 
+### 후속 — PRD 4장 Happy Path 3번(자동 인사말)/9번(수동 종료) 구현 (2026-08-25)
+
+- 요청 내용: (1) `ConversationScreen` 진입 즉시 사용자 입력 없이 AI가 먼저 인사말+질문을
+  자동 출력 — 이번엔 실시간 LLM 생성이 아니라 고정 문구 중 무작위 선택(속도/재현성 우선,
+  사람 확인 완료). 이 첫 메시지도 대화 히스토리(윈도잉 3턴)에 정상 반영되어야 함. (2) 수동
+  종료 버튼 — 종료 후 이동 위치는 PRD에 명시가 없어 임의로 정하지 않고 확인.
+- **사람 확인 후 결정한 것**(트레이드오프 설명 후 확인받음, 근거는 `docs/log/DECISIONS.md`
+  2026-08-25 항목들 참고):
+  1. 종료 후 이동: App.tsx에 `screen: 'setup' | 'conversation'` 전환 상태를 신설해 설정
+     화면으로 복귀. 지금까지 두 화면을 항상 같이 렌더링하던 임시 구조를 실제 화면 전환으로
+     교체 — `NotificationSetup`의 "지금 시작하기"(Day 2 placeholder)도 이번에 실제 연결.
+- 완료 사항:
+  - `src/state-machine/types.ts`/`conversationReducer.ts`: `GREETING_STARTED` 이벤트 추가
+    (`idle → assistant_speaking`, `assistantText`에 인사말 반영). `STREAM_DONE`과 동일한
+    목적지로 보내 이후 흐름(TTS 재생 → `ASSISTANT_SPEECH_DONE` → listening, 마이크 자동 활성화)
+    을 그대로 재사용.
+  - `src/state-machine/useConversationMachine.ts`: `FIXED_GREETINGS`(5개 고정 문구) + `greet()`
+    신설 — historyRef/messages에 먼저 반영(다음 턴 API 호출 문맥 포함) → `GREETING_STARTED`
+    디스패치 → 기존 `playAssistantSpeech()` 재사용(마이크 mute 없음-상태이므로 no-op, TTS
+    재생, 종료 후 마이크 자동 시작). `hasGreetedRef`로 세션당 1회만 실행되게 가드.
+  - `src/components/ConversationScreen/ConversationScreen.tsx`: 마운트 시 `greet()` 자동
+    호출, `onEnd` prop 신설(종료 시 `stop()` + `onEnd()` 호출). "대화 종료" 버튼은 상태와
+    무관하게 항상 활성화로 변경(화면을 나가는 버튼이 됐으므로, 사람 확인 없이 결정한 낮은
+    리스크 판단).
+  - `src/components/NotificationSetup/NotificationSetup.tsx`: placeholder 문구
+    (`START_NOW_PLACEHOLDER`) 제거, "지금 시작하기" 클릭 시 새 `onStartConversation` prop 호출.
+  - `src/App.tsx`: `screen` state 신설, `setup`/`conversation` 중 하나만 렌더링.
+  - `scripts/verify-silence-timer-logic.ts`: `GREETING_STARTED` 관련 3개 케이스 추가(idle에서
+    반영, `ASSISTANT_SPEECH_DONE`으로 listening 복귀, idle이 아닌 상태에서 무시) — 총 29개 케이스
+    전부 PASS.
+  - **실제 브라우저 검증 중 발견해 함께 고친 버그 2건(둘 다 사람 확인 없이 결정, 낮은 리스크,
+    `docs/log/DECISIONS.md` 참고)**:
+    1. React 18 StrictMode(개발 모드)가 마운트 effect를 "실행 → 즉시 가짜 cleanup → 재실행"으로
+       두 번 도는데, `greet()`를 effect 안에서 동기 호출하면 TTS가 막 시작된 직후 그 가짜
+       cleanup이 `cancelTtsPlayback()`을 실행해 재생을 `interrupted` 에러로 끊어버리고, 이후
+       `hasGreetedRef` 가드 때문에 재시도도 안 돼 화면이 `assistant_speaking`에 영원히 멈추는
+       버그를 실제로 재현·확인. `useEffect` 안에서 `setTimeout(() => greet(), 0)` + cleanup에서
+       `clearTimeout`으로 한 틱 미뤄 해결 — 가짜 cleanup이 예약된 타이머를 취소시키고, "진짜"
+       두 번째 마운트에서 예약된 타이머만 살아남아 정확히 한 번 실행된다.
+    2. `beginListeningEngine()`이 음성 미지원 여부를 확인하지 않아, 텍스트 폴백 모드에서도 TTS가
+       끝날 때마다 마이크 엔진을 시작하려다 `unsupported` 에러로 `error` 상태에 튕기는 잠재
+       버그가 Day 5부터 있었음(Day 5 검증은 가짜 `SpeechRecognition`으로 "지원함"을 재현해서
+       이 경로를 안 건드려 못 잡음) — `isSpeechInputSupported()` 가드 추가로 수정.
+    3. **디자인 버그(사람 확인 없이 수정)**: `assistant_speaking` 상태에서 "실시간 말풍선"
+       (`liveAssistantText`)이 이미 `messages`에 반영된 같은 응답을 한 번 더 그려 말풍선이
+       중복 노출되고 있었다 — Day 5 검증 땐 이 구간을 지나쳐서(듣기 상태 도달 후에만 확인)
+       못 잡았던 것. `assistant_speaking`을 `liveAssistantText` 조건에서 제외해 해결
+       (`streaming`에서만 실시간 표시, `assistant_speaking` 진입 시점엔 이미 `messages`가
+       최종본을 갖고 있음).
+  - `npm run verify:silence-timer`(29개), `npm run verify:claude-proxy`(6개), `npx tsc -b`,
+    `npm run lint`(기존과 동일한 무해 경고 2건, 신규 없음), `npm run build` 모두 통과.
+  - **실제 실행 검증(Playwright, `--deny-permission-prompts`로 알림 권한 거부 재현 + 실제
+    로컬 API 서버 + 실제 Claude API + 실제 헤디드 Chrome, 마이크만 가짜 `SpeechRecognition`)**:
+    1. 초기 진입 시 설정 화면(`NotificationSetup`)만 보임 → 알림 권한 요청 클릭 → 실제 거부
+       재현 → "지금 시작하기" 노출 → 클릭 시 대화 화면으로 전환(설정 화면 텍스트는 사라짐).
+    2. 대화 화면 진입 직후 사용자 조작 없이 곧바로 `assistant_speaking`(마이크 꺼짐)으로
+       시작, 실제 `speechSynthesis.speak()`가 고정 인사말로 호출되고 실제 `start`/`end`
+       이벤트까지 발생(4.7초 후 재생 완료) → 자동으로 `listening` 전환 + 마이크 자동 시작
+       (Happy Path 3~4번) 확인. 인사말 말풍선 1개만 노출(중복 없음).
+    3. 가짜 발화 주입 → 실제 Claude 응답까지 정상 완주, 두 번째 AI 응답이 "방금 네가 먼저
+       인사해줬지"라는 사용자 말에 "아, 맞다!"로 반응 — 고정 인사말이 실제로 히스토리
+       윈도잉에 포함되어 다음 턴 문맥으로 전달됐음을 응답 내용으로 확인. 최종 말풍선 3개
+       (인사말/사용자/AI 응답) 정확히 노출.
+    4. "대화 종료" 클릭 → 설정 화면으로 복귀 확인(대화 화면 텍스트 사라짐, Happy Path 9번).
+    5. 재진입("지금 시작하기" 재클릭) → 이전 대화 내역 없이 새로운 무작위 인사말 1개로 다시
+       시작함을 확인(재마운트마다 새 세션).
+    페이지 에러 0건.
+- DoD 체크: 해당 없음(Day N 정식 DoD 항목은 아니고 PRD 4장 Happy Path 3/9번을 채우는 후속
+  작업). **PRD 4장 Happy Path 3번·9번 모두 실제 실행으로 확인 완료.**
+- 이슈/메모:
+  - 실제 브라우저 알림(OS 알림) 클릭 시 이 화면 전환 상태로 연결하는 것은 이번 범위 밖 —
+    Service Worker↔페이지 메시징이 추가로 필요해 `src/sw.ts`의 `notificationclick`은 여전히
+    루트만 연다(기존에도 알려진 제한, Day 7 전까지 필요시 확인).
+  - 고정 인사말 방식은 이번 스프린트 한정 스코프 — 추후 매번 LLM에게 실시간으로 인사말/질문을
+    생성하도록 전환 예정(`docs/log/DECISIONS.md` 참고, `GREETING_STARTED` 이벤트는 그대로
+    재사용 가능하도록 설계해둠).
+
 ## 배포 인프라 사전 검증 — `api/claude-stream.ts` 실서비스 스트리밍 확인 (2026-08-25)
 
 - 요청 내용: Day 6~7 본작업 전에, `api/claude-stream.ts`를 실제 Vercel에 배포했을 때도 로컬과

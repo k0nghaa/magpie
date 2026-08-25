@@ -347,3 +347,71 @@
   `runSendCycle`의 `streamClaudeResponse` 호출). 부수 효과: 지금까지 미사용이었던 서버의
   프롬프트 캐싱 경로(`api/claude-stream.ts`의 `cache_control: ephemeral`)가 이번에 처음으로
   실제 사용됨(CLAUDE.md 8장 비용 통제 원칙 2번).
+
+### 2026-08-25 PRD 4장 Happy Path 3번: 첫 인사말을 고정 문구로 (LLM 실시간 생성은 추후 전환)
+
+- 배경/문제: PRD 4장 Happy Path 3번은 "대화 화면 진입, 인사말과 첫 질문이 스트리밍 텍스트 +
+  TTS 음성으로 자동 출력된다"고만 되어 있고, 이 첫 메시지를 매번 LLM에 실시간으로 생성시킬지,
+  고정된 문구 풀에서 고를지는 명시돼 있지 않다.
+- 검토한 대안: (A) 화면 진입 시마다 LLM에 "인사말+질문 하나 만들어줘" 요청을 보내 실시간
+  생성. (B) 미리 준비한 고정 문구 몇 개 중 하나를 무작위로 선택.
+- 결정: (B), **이번 스프린트 한정 스코프**. 이번 스프린트 이후(PoC 범위 밖) 매번 LLM에게
+  실시간으로 인사말/질문을 생성하도록 전환할 예정.
+- 이유: 사람 확인받음(속도/재현성 우선). (A)는 화면 진입마다 추가 API 호출과 지연이 생기고,
+  데모/테스트 때마다 다른 문구가 나와 재현성이 떨어진다. (B)는 즉시 표시 가능하고 결정론적이라
+  데모·자동화 검증 모두에 유리하다. 고정 문구라도 `SYSTEM_PROMPT`와 같은 톤(1~3문장, 목록/
+  마크다운 없음)으로 맞춰 두면 이후 (A)로 전환할 때 위화감이 없다.
+- 영향받는 범위: `src/state-machine/useConversationMachine.ts`(`FIXED_GREETINGS`, `greet()`),
+  `src/state-machine/types.ts`/`conversationReducer.ts`(`GREETING_STARTED` 이벤트,
+  `idle → assistant_speaking` 전이 추가). **되돌릴 때 변경 범위**: `greet()`의 문구 선택 부분만
+  실제 `streamClaudeResponse` 호출로 바꾸면 되고, 상태머신/`ConversationScreen`은 무변경
+  (`GREETING_STARTED`를 실시간 생성 완료 시점에 그대로 재사용 가능).
+
+### 2026-08-25 PRD 4장 Happy Path 9번: 종료 후 이동 — App.tsx에 화면 전환 상태 추가
+
+- 배경/문제: "수동 종료 버튼으로 세션을 마친다"고만 되어 있고 종료 후 어디로 가는지는
+  PRD에 없다. 게다가 지금까지 `App.tsx`는 `NotificationSetup`과 `ConversationScreen`을 항상
+  같이 렌더링하고 있어(Day 2부터 이어진 임시 배치 방식), 실제 화면 전환/라우팅 자체가 없었다.
+- 검토한 대안: (A) `App.tsx`에 `useState<'setup'|'conversation'>` 화면 전환 상태를 추가해 한
+  번에 한 화면만 렌더링. 종료 시 `setup`으로 복귀, `NotificationSetup`의 "지금 시작하기"·
+  대화 화면 진입 시 `conversation`으로 전환. (B) 지금 구조를 유지하고 "종료"는 대화 상태만
+  `idle`로 리셋(화면 이동 없음).
+  트레이드오프를 사람에게 설명(재진입=재마운트이므로 Happy Path 3번의 "화면 진입 시 자동
+  인사말"과도 자연스럽게 맞물린다는 점, (B)는 화면 이동이라는 개념 자체가 없어져 이번 요청의
+  취지를 못 채운다는 점)한 뒤 확인받음.
+- 결정: (A).
+- 이유: 사람 확인받음(트레이드오프 설명 후 (A) 선택). 라우터 라이브러리 없이 상태 하나로
+  충분하다고 판단(URL 딥링크 요구사항 없음, 화면 2개뿐) — 과설계 방지. 부수적으로
+  `NotificationSetup`의 "지금 시작하기" placeholder(Day 2 결정, "Day 3+에서 실제 네비게이션으로
+  교체 필요"로 이미 예고돼 있었음)도 이번에 실제 연결로 교체.
+- 영향받는 범위: `src/App.tsx`(`screen` state), `src/components/NotificationSetup/NotificationSetup.tsx`
+  (`onStartConversation` prop, `START_NOW_PLACEHOLDER` 제거), `src/components/ConversationScreen/ConversationScreen.tsx`
+  (`onEnd` prop). **범위 밖으로 남긴 것**: 실제 브라우저 알림(OS 알림) 클릭 시 이 화면 전환
+  상태로 연결하는 것은 Service Worker↔페이지 메시징이 추가로 필요해 이번엔 포함하지 않음
+  (`src/sw.ts`의 `notificationclick`은 여전히 루트만 엶 — 기존에도 알려진 제한).
+
+### 2026-08-25 `beginListeningEngine()`에 `isSpeechInputSupported()` 가드 추가 — 부수 발견 버그 수정
+
+- 배경/문제: Happy Path 3번(자동 인사말) 구현 중 발견 — 인사말이든 일반 응답이든 TTS 재생이
+  끝나면(`playAssistantSpeech`의 `onEnd`) 항상 `beginListeningEngine()`을 호출해 마이크를
+  재시작하려 했는데, 이 함수는 브라우저가 음성 인식을 지원하는지 확인하지 않았다. 즉 텍스트
+  폴백 모드(미지원 브라우저)에서도 TTS가 끝날 때마다 `WebSpeechInputEngine.start()`가 불려
+  즉시 `unsupported` 에러를 내고 상태가 `error`로 튕기는 잠재 버그가 Day 5 때부터 있었다(Day 5
+  검증은 가짜 `SpeechRecognition`으로 "지원함"을 재현했기 때문에 이 경로를 안 건드려 못 잡았음).
+- 결정: `beginListeningEngine()` 맨 앞에 `if (!isSpeechInputSupported()) return` 가드 추가.
+- 이유: 사람 확인 없이 결정(명백한 버그 수정, 낮은 리스크) — 텍스트 폴백 모드는
+  `TextInputFallback`의 제출이 곧 다음 턴 트리거라 마이크 엔진이 애초에 필요 없고, 상태는
+  이미 호출자가 `listening`으로 전환해둔 상태라 이 가드만 추가해도 아무 부작용이 없다.
+- 영향받는 범위: `src/state-machine/useConversationMachine.ts`(`beginListeningEngine`).
+
+### 2026-08-25 "대화 종료" 버튼을 상태와 무관하게 항상 활성화 — 사람 확인 없이 결정
+
+- 배경/문제: 화면 전환이 생기면서 "대화 종료" 버튼이 단순 상태 리셋이 아니라 "화면을 완전히
+  나가는" 버튼이 됐다. 기존엔 `isActive`(status가 idle/error가 아닐 때)에서만 활성화됐는데,
+  이 규칙을 그대로 두면 인사말이 나오기 전(아직 idle)이나 에러 상태에서는 화면을 나갈 방법이
+  없어진다.
+- 결정: `disabled` 조건 제거, 항상 클릭 가능하게 변경.
+- 이유: 사람 확인 없이 결정(낮은 리스크, 되돌리기 쉬움) — "화면을 나가는" 버튼은 대화가
+  진행 중이든 아니든 항상 눌릴 수 있어야 자연스럽다고 판단. `stop()`은 idle 상태에서 불려도
+  안전(이미 비어있는 걸 다시 정리할 뿐).
+- 영향받는 범위: `src/components/ConversationScreen/ConversationScreen.tsx`(종료 버튼).

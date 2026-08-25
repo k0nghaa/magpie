@@ -40,6 +40,7 @@
 - **상태 다이어그램(현재 구현 범위)**:
   ```
   idle --START_LISTENING--> listening
+  idle --GREETING_STARTED(화면 진입 시 자동, PRD 4장 Happy Path 3번)--> assistant_speaking (고정 인사말)
   listening --INTERIM_RESULT--> user_speaking (transcript 갱신)
   user_speaking --INTERIM_RESULT--> user_speaking (transcript 갱신, 무음 타이머 리셋)
   user_speaking --SILENCE_TIMEOUT(~1.2초 무음)--> sending
@@ -384,6 +385,28 @@
   무음 → `sending → streaming → assistant_speaking → listening` 전체 사이클을 실제 Claude
   응답으로 완주, 완결된 말풍선 2개(user/assistant) 노출 확인. (5) "대화 종료" 클릭 →
   `EmptyState` 재노출 + 말풍선 리스트 초기화 확인. 페이지 에러 0건.
+
+## 5-2. PRD 4장 Happy Path 3번(자동 인사말)/9번(수동 종료) 구현
+
+- **화면 전환**: `App.tsx`에 `screen: 'setup' | 'conversation'` state 신설 — 라우터 라이브러리
+  없이 두 화면 중 하나만 렌더링(화면이 2개뿐이고 URL 딥링크 요구사항이 없어 과설계 방지, 사람
+  확인 후 결정). `NotificationSetup`의 "지금 시작하기"가 `conversation`으로, `ConversationScreen`
+  의 "대화 종료"가 `setup`으로 전환한다. 근거는 `docs/log/DECISIONS.md` 참고.
+- **자동 인사말**: `useConversationMachine`의 `greet()`가 `ConversationScreen` 마운트 시
+  자동 호출된다. 이번 스프린트는 고정 문구 풀에서 무작위 선택(추후 LLM 실시간 생성으로 전환
+  예정, 근거는 `docs/log/DECISIONS.md`) — `GREETING_STARTED` 이벤트가 `idle → assistant_speaking`
+  으로 보내고, 이후 흐름(TTS 재생 → 마이크 자동 활성화)은 기존 `STREAM_DONE` 경로와 완전히
+  동일하게 재사용된다. 인사말도 `historyRef`/`messages`에 먼저 반영되어 다음 턴의 API 요청
+  문맥에 포함된다.
+- **React 18 StrictMode 함정(실제로 겪은 버그)**: `greet()`를 마운트 effect 안에서 동기
+  호출하면, StrictMode(개발 모드)의 "마운트→가짜 cleanup→재마운트" 이중 실행이 TTS가 막
+  시작된 직후 `cancelTtsPlayback()`을 실행시켜 재생을 끊어버려 화면이 영원히 멈췄다.
+  `setTimeout(() => greet(), 0)` + cleanup에서 `clearTimeout`으로 한 틱 미뤄 해결.
+- **부수 발견 버그**: `beginListeningEngine()`이 음성 미지원 여부를 확인하지 않아 텍스트
+  폴백 모드에서도 TTS 종료마다 마이크 엔진 시작을 시도하다 즉시 `unsupported` 에러로 튕기는
+  버그가 있었음(`isSpeechInputSupported()` 가드 추가로 수정), `assistant_speaking` 진입 시
+  이미 `messages`에 반영된 응답이 실시간 말풍선으로 한 번 더 그려지는 중복 버그도 함께 수정.
+  둘 다 `docs/log/DECISIONS.md` 참고.
 
 ## 6. 상태 갤러리 라우트
 

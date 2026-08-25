@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useRef, useState } from 'react'
-import { WebSpeechInputEngine } from '../adapters/speech-input/WebSpeechInputEngine.ts'
+import { isSpeechInputSupported, WebSpeechInputEngine } from '../adapters/speech-input/WebSpeechInputEngine.ts'
 import { WebSpeechSynthesisEngine } from '../adapters/speech-output/WebSpeechSynthesisEngine.ts'
 import type { SpeechInputEngine, SpeechOutputEngine } from '../adapters/types.ts'
 import { ClaudeStreamError, streamClaudeResponse, type ClaudeMessage } from '../api/claudeProxy.ts'
@@ -21,6 +21,18 @@ const SYSTEM_PROMPT = `당신은 사용자와 아침에 짧게 스몰토크를 �
 - 목록(-, 1. 2. 3.)이나 마크다운 서식을 쓰지 않습니다 — 이 텍스트는 음성으로 그대로 읽힙니다.
 - 실시간 정보(날씨·뉴스 등)에 접근할 수 없으면 짧게만 인정하고 자연스럽게 다른 화제로 이어갑니다.
 - 대화가 이어지도록 가끔 짧은 되물음을 섞습니다.`
+
+// PRD 4장 Happy Path 3번 — 화면 진입 시 AI가 먼저 인사말+질문을 건다. **이번 스코프(사람 확인
+// 완료)**: 매번 LLM에 실시간으로 생성시키지 않고 고정 문구 중 하나를 무작위로 고른다(속도/
+// 재현성 우선). 추후(이번 스프린트 이후) LLM 실시간 생성으로 전환 예정 — 근거는
+// docs/log/DECISIONS.md 참고. SYSTEM_PROMPT와 동일한 톤(1~3문장, 목록/마크다운 없음)으로 맞춤.
+const FIXED_GREETINGS = [
+  '좋은 아침이에요! 오늘 기분은 좀 어때요?',
+  '안녕하세요! 잘 잤어요? 오늘 하루는 어떻게 보낼 계획이에요?',
+  '좋은 아침! 오늘 날씨는 어때요, 나가기 좋은 날인가요?',
+  '안녕하세요, 오늘도 좋은 하루 보내고 있어요? 지금 뭐 하고 있었어요?',
+  '좋은 아침이에요! 어젯밤엔 잘 쉬었어요?',
+]
 
 // 엔진을 팩토리로 주입받는다 — PRD 3장 검증 기준("mock 구현으로 교체해도 상태머신이 무변경으로
 // 동작")을 그대로 만족하기 위함. 기본값은 실제 WebSpeechInputEngine. start/stop은 버튼 클릭 같은
@@ -53,6 +65,11 @@ export function useConversationMachine(
   // ref 접근"으로 오인되는 린트 경고가 나서, start()/stop()과 동일하게 컴포넌트 스코프의
   // 일반 함수로 분리했다.
   const silenceTimerRef = useRef(createSilenceTimer(handleSilenceTimeout))
+  // greet()가 세션당 한 번만 실행되게 막는 가드. state.status로만 판단하면 React 18
+  // StrictMode(개발 모드)가 마운트 effect를 두 번 실행할 때 두 번째 호출도 같은 렌더의 stale
+  // 클로저를 봐서(dispatch가 아직 반영 안 됨) status가 여전히 idle로 보여 막지 못한다 — ref는
+  // 그 동기 이중 호출 사이에도 즉시 반영되므로 이걸로 막는다.
+  const hasGreetedRef = useRef(false)
 
   // 실제 LLM 호출 — TEXT_SUBMITTED/SILENCE_TIMEOUT이 일어나는 그 자리에서 직접 호출한다
   // (state.status 변화를 useEffect로 관찰해서 트리거하지 않는다). 처음엔 useEffect(deps:
@@ -118,6 +135,12 @@ export function useConversationMachine(
   // 후 결정한 이번 스코프: Day 1 SpeechInputEngine에 pause/resume 메서드를 새로 추가하지 않고
   // 기존 stop()/start() 재호출만으로 mute를 구현하기로 함).
   function beginListeningEngine() {
+    // 음성 미지원 브라우저(텍스트 폴백 모드)에서는 아예 시도하지 않는다 — 예전엔 이 가드가
+    // 없어서, 텍스트로 대화하다가 TTS 재생이 끝날 때마다 자동으로 마이크를 켜려다가 즉시
+    // `unsupported` 에러가 나 error 상태로 튕기는 버그가 있었다(이번에 발견해 함께 고침,
+    // docs/log/DECISIONS.md 참고). 텍스트 폴백은 `TextInputFallback`의 제출이 곧 다음 턴
+    // 트리거라 마이크 엔진이 애초에 필요 없다.
+    if (!isSpeechInputSupported()) return
     transcriptRef.current = ''
     const engine = engineFactory()
     engineRef.current = engine
@@ -172,6 +195,20 @@ export function useConversationMachine(
     beginListeningEngine()
   }
 
+  // PRD 4장 Happy Path 3번 — 화면 진입 시 자동으로 한 번 호출(ConversationScreen의 mount
+  // effect). 고정 문구 중 하나를 무작위로 골라 assistant 턴으로 취급 — STREAM_DONE 이후와
+  // 동일하게 historyRef/messages에 먼저 반영해야 다음 턴 API 호출 시 문맥에 포함된다.
+  function greet() {
+    if (hasGreetedRef.current) return
+    hasGreetedRef.current = true
+
+    const greeting = FIXED_GREETINGS[Math.floor(Math.random() * FIXED_GREETINGS.length)]
+    historyRef.current = [...historyRef.current, { role: 'assistant', content: greeting }]
+    setMessages(historyRef.current)
+    dispatch({ type: 'GREETING_STARTED', text: greeting })
+    playAssistantSpeech(greeting)
+  }
+
   // SpeechOutputEngine 인터페이스(Day 1)엔 cancel()이 없다 — 재생 중 수동 중지를 위한 내부
   // 전용 메서드라 어댑터 구현체에 있을 때만 옵셔널하게 호출한다(구현체가 없거나 mock이면 그냥
   // 넘어감, 인터페이스 시그니처 변경 없이 처리).
@@ -223,5 +260,5 @@ export function useConversationMachine(
     }
   }, [])
 
-  return { state, start, stop, resumeSpeaking, submitText, messages }
+  return { state, start, stop, resumeSpeaking, submitText, messages, greet }
 }

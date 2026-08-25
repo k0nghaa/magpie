@@ -34,4 +34,5 @@ export type ConversationEvent =
   | { type: 'STREAM_DONE' }
   | { type: 'STREAM_ERROR'; error: SpeechInputError }
   | { type: 'ASSISTANT_SPEECH_DONE' }
+  | { type: 'GREETING_STARTED'; text: string }
   | { type: 'RESET' }
