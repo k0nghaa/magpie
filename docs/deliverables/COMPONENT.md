@@ -14,9 +14,9 @@
 | 컴포넌트 | 역할 | 비고 |
 |---|---|---|
 | `NotificationSetup` | 시간 설정, 권한 요청, 권한 상태별 안내 | `input type="time"`, 시간값 localStorage 유지 |
-| `ConversationScreen` | 상태머신 컨테이너 | 아직 미작성(Day 4+) — 지금은 `SpeechInputDemo`가 임시로 대체 |
-| `ChatMessageList` / `ChatBubble` | user/assistant variant | |
-| `TurnIndicator` | 현재 상태를 시각적+aria-live로 표시 | 자동 전환의 핵심 UX |
+| `ConversationScreen` | 상태머신 컨테이너 (구현 완료, Day 5 후속) | `SpeechInputDemo`(임시 디버그) 제거, 실제 화면으로 조립 |
+| `ChatMessageList` / `ChatBubble` | user/assistant variant (구현 완료, Day 5 후속) | 색/정렬로만 구분, 그 이상 스타일링 없음(사람 확인 후 결정한 스코프) |
+| `TurnIndicator` | 현재 상태를 시각적+aria-live로 표시 (구현 완료, Day 5 후속) | 텍스트+aria-live만, 아이콘/시각 효과 없음 |
 | `ResumeSpeakingButton` | 무음 오탐 시 복구용 (구현 완료, Day 3) | `user_speaking`/`sending`에서만 렌더링, 클릭 시 `listening` 복귀 |
 | `TextInputFallback` | 음성 미지원 환경 자동 노출 (구현 완료, Day 3) | 전송 버튼/Enter가 턴 종료 신호, 무음 감지 로직 없음 |
 | `StreamingIndicator` | 스트리밍 중 표시 (구현 완료, Day 4) | `sending`/`streaming`에서만 렌더링, 응답 대기와 토큰 수신 중 문구 구분 |
@@ -358,6 +358,32 @@
   `ConversationScreen`이 아직 없는 상태에서 실제로 가지도 않는 화면으로 이동하는 척(가짜 완료)을
   만들지 않기 위한 선택, 사용자 확인 후 결정 (`docs/log/DECISIONS.md` 참고). Day 3+에서
   `ConversationScreen`이 생기면 `handleStartNow`를 실제 네비게이션으로 교체해야 함.
+
+## 5-1. `ConversationScreen` 조립 (Day 5 후속 — `SpeechInputDemo` 제거)
+
+- **스코프 결정(사람 확인)**: 이 화면에서 돋보여야 하는 건 음성 상호작용(자동 턴테이킹, TTS)이지
+  채팅 UI 비주얼이 아니다 — `ChatBubble`은 색/정렬(user: 진한 배경 + 우측 정렬, assistant: 밝은
+  배경 + 좌측 정렬)로만 구분하고 그림자·애니메이션·세밀한 타이포그래피는 넣지 않았다.
+  `TurnIndicator`도 텍스트 + `aria-live`만 있고 아이콘/시각 효과가 없다. 기존
+  `ResumeSpeakingButton`/`TextInputFallback`/`StreamingIndicator`/`ErrorBanner`/`EmptyState`는
+  스타일 변경 없이 그대로 재배치만 했다.
+- **`messages`(화면 표시용 히스토리) 신설**: `useConversationMachine`은 원래 비용 통제용
+  `historyRef`(윈도잉된 API 요청용, ref라 리렌더 안 함)만 갖고 있어 과거 턴을 화면에 그릴 방법이
+  없었다. 같은 배열을 `useState`로도 미러링해 `messages`로 노출 — `historyRef`는 API 요청
+  시점에만 최근 N턴으로 슬라이스되고, `messages`는 세션 전체(윈도잉 없음)를 그대로 보여준다.
+  "대화 종료" 버튼(`stop()`)을 누르면 `historyRef`/`messages` 둘 다 비운다 — "초기화"라는
+  이름 그대로 화면에 남은 대화도 함께 지우는 게 자연스럽다고 판단(사람 확인 없이 결정, 낮은
+  리스크, `docs/log/DECISIONS.md` 참고).
+- **실시간 말풍선**: 완결된 과거 턴(`messages`)에 더해, 지금 진행 중인 턴(사용자가 말하는 중인
+  `transcript` / AI가 스트리밍 중인 `assistantText`)도 `ChatMessageList`의 마지막 말풍선으로
+  얹는다 — 별도의 "로딩 말풍선" 컴포넌트 없이 기존 `ChatBubble`을 그대로 재사용.
+- **실제 실행 검증(Playwright, 실제 로컬 API 서버 + 실제 Claude API + 실제 헤디드 Chrome, 마이크만
+  Day 3~5와 동일한 가짜 `SpeechRecognition`)**: (1) `SpeechInputDemo` 잔재 없음, "대화
+  시작"/"대화 종료" 버튼과 초기 `EmptyState` 노출 확인. (2) "대화 시작" 클릭 → `listening`
+  전환 확인. (3) 가짜 발화 주입 → `user_speaking` 전환 + 실시간 유저 말풍선 노출 확인. (4)
+  무음 → `sending → streaming → assistant_speaking → listening` 전체 사이클을 실제 Claude
+  응답으로 완주, 완결된 말풍선 2개(user/assistant) 노출 확인. (5) "대화 종료" 클릭 →
+  `EmptyState` 재노출 + 말풍선 리스트 초기화 확인. 페이지 에러 0건.
 
 ## 6. 상태 갤러리 라우트
 

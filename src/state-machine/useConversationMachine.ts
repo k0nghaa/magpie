@@ -1,4 +1,4 @@
-import { useEffect, useReducer, useRef } from 'react'
+import { useEffect, useReducer, useRef, useState } from 'react'
 import { WebSpeechInputEngine } from '../adapters/speech-input/WebSpeechInputEngine.ts'
 import { WebSpeechSynthesisEngine } from '../adapters/speech-output/WebSpeechSynthesisEngine.ts'
 import type { SpeechInputEngine, SpeechOutputEngine } from '../adapters/types.ts'
@@ -43,6 +43,9 @@ export function useConversationMachine(
   // 순수 로직이고, "서버로 보낼 메시지 목록"은 그와 다른 관심사(비용 통제)라 분리했다. ref인
   // 이유: 매 턴 갱신되지만 그 자체로 리렌더를 유발할 필요가 없는 값이라서.
   const historyRef = useRef<ClaudeMessage[]>([])
+  // 화면 표시용 — historyRef와 값은 같지만(같은 배열을 그대로 공유) ref라 리렌더를 안 일으켜서
+  // 화면에 보여주려면 별도 state가 필요하다. ConversationScreen의 ChatMessageList가 쓴다.
+  const [messages, setMessages] = useState<ClaudeMessage[]>([])
   // 현재 진행 중인 LLM 스트리밍 요청을 취소할 수 있도록 보관 — 언마운트/stop() 시 정리한다.
   const activeStreamControllerRef = useRef<AbortController | null>(null)
   // handleSilenceTimeout은 함수 선언(hoisted)이라 여기서 미리 참조해도 된다 — 콜백을
@@ -84,6 +87,7 @@ export function useConversationMachine(
         { role: 'user', content: userText },
         { role: 'assistant', content: assistantText },
       ]
+      setMessages(historyRef.current)
       dispatch({ type: 'STREAM_DONE' })
       playAssistantSpeech(assistantText)
     } catch (err) {
@@ -183,6 +187,8 @@ export function useConversationMachine(
     engineRef.current = null
     activeStreamControllerRef.current?.abort()
     cancelTtsPlayback()
+    historyRef.current = []
+    setMessages([])
     dispatch({ type: 'RESET' })
   }
 
@@ -217,5 +223,5 @@ export function useConversationMachine(
     }
   }, [])
 
-  return { state, start, stop, resumeSpeaking, submitText }
+  return { state, start, stop, resumeSpeaking, submitText, messages }
 }

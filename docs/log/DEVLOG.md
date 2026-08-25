@@ -681,6 +681,42 @@
     Day 4까지의 "설명형"에서 "대화형"으로 바뀌었다 — Day 4의 실제 실행 검증 로그(문서형 긴
     답변 예시)와 비교하면 차이가 뚜렷하다.
 
+### 후속 — `SpeechInputDemo` 제거, `ConversationScreen` 정식 조립 (2026-08-25)
+
+- 요청 내용: PRD 6장 컴포넌트 목록대로 `ConversationScreen`을 조립하고 임시 디버그
+  컴포넌트(`SpeechInputDemo`)를 제거. 이 화면에서 돋보여야 하는 건 음성 상호작용(자동
+  턴테이킹, TTS)이지 채팅 UI 비주얼이 아니므로, `ChatMessageList`/`ChatBubble`은 색/정렬
+  구분만, `TurnIndicator`는 텍스트+`aria-live`만 하고 그 이상(그림자·애니메이션·아이콘 등)은
+  만들지 말 것. 기존 `ResumeSpeakingButton`/`TextInputFallback`/`StreamingIndicator`/
+  `ErrorBanner`/`EmptyState`는 스타일 변경 없이 재배치만.
+- 완료 사항:
+  - `src/components/ConversationScreen/ChatBubble.tsx`(신규): user/assistant를 배경색+정렬로만
+    구분(요청대로 그 이상 스타일링 없음).
+  - `src/components/ConversationScreen/ChatMessageList.tsx`(신규): 완결된 과거 턴 목록 +
+    진행 중인 턴(사용자 interim 텍스트 / AI 스트리밍 텍스트)을 마지막 말풍선으로 함께 렌더링.
+  - `src/components/ConversationScreen/TurnIndicator.tsx`(신규): 상태별 문구 + `aria-live`만.
+  - `src/state-machine/useConversationMachine.ts`: 화면 표시용 `messages` state 신설(기존
+    비용 통제용 `historyRef`를 그대로 미러링하되 윈도잉 없이 세션 전체를 보여줌). `stop()`
+    (대화 종료)에서 `historyRef`/`messages`를 함께 비움.
+  - `src/components/ConversationScreen/ConversationScreen.tsx`(신규): 위 컴포넌트 + 기존
+    `ResumeSpeakingButton`/`TextInputFallback`/`StreamingIndicator`/`ErrorBanner`/`EmptyState`를
+    조립. 버튼 문구를 디버그용("마이크 테스트 시작"/"중지 초기화")에서 실제 화면용("대화
+    시작"/"대화 종료")으로 변경.
+  - `src/App.tsx`: `SpeechInputDemo` 대신 `ConversationScreen` 렌더링.
+  - `src/components/SpeechInputDemo/`(디렉터리 전체 삭제).
+  - `npm run verify:silence-timer`(26개), `npm run verify:claude-proxy`(6개), `npx tsc -b`,
+    `npm run lint`(기존과 동일한 무해 경고 2건, 신규 없음), `npm run build` 모두 통과.
+  - **실제 실행 검증(Playwright, 실제 로컬 API 서버 + 실제 Claude API + 실제 헤디드 Chrome,
+    마이크만 가짜 `SpeechRecognition`)**: `SpeechInputDemo` 잔재 없음 확인 → "대화 시작" 클릭
+    시 `listening` 전환 → 가짜 발화로 `user_speaking` 전환 + 실시간 유저 말풍선 노출 확인 →
+    무음 → `sending → streaming → assistant_speaking → listening` 전체 사이클을 실제 Claude
+    응답으로 완주, 완결된 말풍선 2개(user: "안녕 테스트야" / assistant: 실제 Claude 응답) 노출
+    확인 → "대화 종료" 클릭 시 `EmptyState` 재노출 + 말풍선 리스트 초기화 확인. 페이지 에러
+    0건.
+- DoD 체크: 해당 없음(Day 5 정식 DoD는 이전 항목에서 이미 통과 — 이번은 PRD 6장 컴포넌트
+  목록을 채우는 후속 작업).
+- 이슈/메모: 없음.
+
 ## 배포 인프라 사전 검증 — `api/claude-stream.ts` 실서비스 스트리밍 확인 (2026-08-25)
 
 - 요청 내용: Day 6~7 본작업 전에, `api/claude-stream.ts`를 실제 Vercel에 배포했을 때도 로컬과
