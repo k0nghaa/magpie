@@ -133,6 +133,13 @@
     streaming --STREAM_DONE--> listening
     (sending|streaming) --STREAM_ERROR--> error
   ```
+  **Day 4 DoD 재검증(2026-08-25)에서 확인된 사실**: `sending`은 리듀서 레벨에서 실제로
+  발생하지만(`verify:silence-timer`의 "TEXT_SUBMITTED → 바로 sending" 등으로 결정론적으로
+  증명됨), 화면(DOM)에는 별도 프레임으로 그려지지 않는다 — `TEXT_SUBMITTED`/`SILENCE_TIMEOUT`
+  디스패치 직후 같은 동기 실행 흐름 안에서 곧바로 `STREAM_STARTED`가 디스패치돼 React 18+의
+  자동 배칭이 `sending → streaming` 두 업데이트를 한 커밋으로 묶기 때문이다. 버그가 아니라
+  응답이 그만큼 빠르다는 뜻이며, `docs/log/DEVLOG.md`의 Day 4 DoD 검증 항목에 MutationObserver
+  기반 타임라인으로 기록해뒀다.
 - **`claudeProxy.ts` 설계**: `api/claude-stream.ts`가 Anthropic SDK 원본 이벤트를 그대로
   `data: {...}\n\n`로 중계하고 `[DONE]`으로 끝난다는 걸 서버 코드를 직접 읽어 확인한 뒤, 그
   형식에만 맞춰 fetch+`ReadableStream`으로 파싱했다(MDN 기준, 청크 경계 버퍼링 포함) — 상세
