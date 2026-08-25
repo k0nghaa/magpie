@@ -1,6 +1,6 @@
 # PERFORMANCE_REPORT.md — 성능·접근성 리포트
 
-> Day 6에 수치를 채운다. 표 틀만 미리 준비해둔다.
+> Day 6에 수치를 채우고 Day 7에 최종 취합(엔진 교체 용이성 검증 포함)했다.
 
 ## Lighthouse
 
@@ -87,7 +87,35 @@ FCP/LCP/Speed Index는 로컬호스트 환경(네트워크 지연 없음)에서 
 - [x] 음성 미지원 브라우저(Safari 등)에서 텍스트 모드 자동 전환 확인 — `SpeechRecognition` 생성자
       제거 재현으로 확인(Day 3 검증 + 이번 키보드 시나리오에서 재확인).
 
-## 엔진 교체 용이성 검증
+## 엔진 교체 용이성 검증 (Day 7)
 
-mock `SpeechInputEngine`/`SpeechOutputEngine`/`ReminderEngine`으로 교체 시
-상태머신이 무변경으로 동작하는지: 
+PRD 3장 검증 기준: "mock 구현으로 교체해도 상태머신이 무변경으로 동작하는지 확인". 이 항목은
+Day 3~6 어디에서도 실제로 실행된 적이 없어(코드상 `engineFactory` 의존성 주입 설계만 있고
+실행 기록 없음) Day 7에 뒤늦게 채운다.
+
+- **방법**: `useConversationMachine(engineFactory, ttsEngineFactory)`에 브라우저 API를 전혀
+  참조하지 않는 최소 mock `SpeechInputEngine`/`SpeechOutputEngine`을 주입하고, 실제
+  `react-dom/client` 렌더링(headless Chrome)으로 상태 전이를 관찰했다. 임시 하니스로
+  작성해 실행 후 삭제(커밋하지 않음) — `scripts/verify-*.ts`처럼 상시 보관하기엔 React 렌더링이
+  필요해 무게가 안 맞는다고 판단.
+- **검증 결과(7개 항목 모두 통과)**:
+  ```
+  PASS: greet() 직후 idle → assistant_speaking
+  PASS: greet() 문구가 mock TTS.speak()에 그대로 전달됨
+  PASS: mock TTS 인스턴스 1개 생성됨
+  PASS: TTS onEnd → assistant_speaking → listening
+  PASS: TTS onEnd 이후 mock STT.start() 1회 호출됨(beginListeningEngine)
+  PASS: mock STT interim 결과 → listening → user_speaking, transcript 반영
+  PASS: 무음 타이머(1.2초) 경과 → user_speaking → sending(즉시 streaming/error로 배칭·전이될 수 있음, API 서버 미기동 환경)
+  ```
+- **결론**: `WebSpeechInputEngine`/`WebSpeechSynthesisEngine` 구현체를 전혀 참조하지 않는
+  mock으로 교체해도 상태머신(리듀서, 무음 타이머, `greet`/`start`/`playAssistantSpeech` 흐름)이
+  코드 변경 없이 그대로 동작함을 확인 — PRD 3장 요구사항 충족.
+- **정직한 한계**: (1) 이 검증은 `SpeechInputEngine`/`SpeechOutputEngine` 두 어댑터만 다룬다.
+  `ReminderEngine`(`BrowserNotificationEngine`)은 `NotificationSetup`이 직접 소유하고
+  상태머신과 결합돼 있지 않아(어댑터 분리 원칙상 애초에 결합될 이유가 없음) 이 항목의 검증
+  대상이 아니다. (2) 무음 타이머가 `sending`을 트리거한 직후 `runSendCycle()`이 실제 API로
+  fetch를 보내는데, 이 하니스는 `dev:api` 서버를 띄우지 않은 채 실행해 곧바로
+  `STREAM_ERROR`(`error`)로 이어졌다 — 이는 mock 엔진과 무관한 예상된 동작이고("무음 타이머가
+  mock STT 엔진만으로 정상적으로 `sending`을 트리거했다"는 사실 자체가 이 검증의 목적), 실제
+  스트리밍 파싱은 `verify:stream`/`verify:claude-proxy`가 별도로 담당한다.
