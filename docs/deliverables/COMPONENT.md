@@ -19,8 +19,9 @@
 | `TurnIndicator` | 현재 상태를 시각적+aria-live로 표시 | 자동 전환의 핵심 UX |
 | `ResumeSpeakingButton` | 무음 오탐 시 복구용 (구현 완료, Day 3) | `user_speaking`/`sending`에서만 렌더링, 클릭 시 `listening` 복귀 |
 | `TextInputFallback` | 음성 미지원 환경 자동 노출 (구현 완료, Day 3) | 전송 버튼/Enter가 턴 종료 신호, 무음 감지 로직 없음 |
-| `StreamingIndicator` | 스트리밍 중 표시 | |
-| `ErrorBanner`, `EmptyState` | 예외 상태 | |
+| `StreamingIndicator` | 스트리밍 중 표시 (구현 완료, Day 4) | `sending`/`streaming`에서만 렌더링, 응답 대기와 토큰 수신 중 문구 구분 |
+| `ErrorBanner` | 예외 상태 — API/네트워크 오류 (구현 완료, Day 4) | 에러 메시지 + "재시도"(idle로 복귀, 자동 재전송 아님) |
+| `EmptyState` | 예외 상태 — 첫 진입 시 빈 화면 (구현 완료, Day 4) | `idle`에서만 렌더링 |
 
 ## 3. 상태관리 설계 근거
 
@@ -31,12 +32,12 @@
   규칙을 각 이벤트 케이스 안에 명시적으로 적을 수 있어 원천 차단이 코드로 드러난다
   (`src/state-machine/conversationReducer.ts`의 각 `case`가 `if (state.status === ...)`로
   가드하는 방식).
-- **이번 단계에서 구현한 상태(5개, 사람 확인 후 결정)**: `idle` / `listening` / `user_speaking` /
-  `sending` / `error`. PRD 6장의 `assistant_speaking`/`streaming`은 TTS(Day 5)/LLM 스트리밍
-  (Day 4) 어댑터가 아직 없어 지금 만들면 실제로 도달·테스트되지 않는 상태가 되므로 이번 단계
-  범위에서 제외(`docs/log/DECISIONS.md` 참고) — 해당 어댑터가 생기는 날 `conversationReducer`에
-  상태/이벤트를 추가한다(기존 케이스에 영향 없음, `switch` 구조이므로).
-- **상태 다이어그램(이번 단계 구현 범위)**:
+- **구현된 상태(6개)**: `idle` / `listening` / `user_speaking` / `sending` / `streaming` / `error`.
+  `streaming`은 Day 4에서 LLM 스트리밍 연동과 함께 추가했다. PRD 6장의 `assistant_speaking`은
+  TTS(`SpeechOutputEngine`)가 생기는 Day 5까지 계속 제외한다 — 지금 추가하면 실제로
+  도달·검증되지 않는 상태가 되기 때문(사람 확인 후 결정, `docs/log/DECISIONS.md` 참고). Day 5에
+  `streaming → assistant_speaking → listening`으로 확장할 예정.
+- **상태 다이어그램(현재 구현 범위)**:
   ```
   idle --START_LISTENING--> listening
   listening --INTERIM_RESULT--> user_speaking (transcript 갱신)
@@ -45,12 +46,19 @@
   user_speaking --RESUME_SPEAKING(이어서 말하기)--> listening (transcript 보존)
   sending --RESUME_SPEAKING(이어서 말하기)--> listening (transcript 보존)
   (idle|listening|user_speaking) --TEXT_SUBMITTED(텍스트 전송/Enter)--> sending
+  sending --STREAM_STARTED--> streaming
+  streaming --STREAM_DELTA(반복)--> streaming (assistantText 누적)
+  streaming --STREAM_DONE--> listening
+  (sending|streaming) --STREAM_ERROR--> error
   (모든 상태) --ENGINE_ERROR--> error
   error --START_LISTENING(재시도)--> listening
   (모든 상태) --RESET--> idle
   ```
-  `sending`은 이번 단계에서 종착점이다 — 실제 LLM 전송(Day 4)이 붙기 전까지는 여기서 더
-  진행하지 않는 게 맞는 동작이다(가짜로 다음 상태로 넘어가지 않음).
+  **참고**: `sending`은 리듀서 레벨에서는 실제로 거치는 상태이지만(단위 테스트로 결정론적으로
+  증명됨), `TEXT_SUBMITTED`/`SILENCE_TIMEOUT` 직후 같은 동기 흐름에서 곧바로 `STREAM_STARTED`가
+  디스패치되어 React 18+의 자동 배칭이 `sending → streaming`을 한 커밋으로 묶는다 — 그래서
+  화면에는 `sending`이 별도 프레임으로 안 보일 수 있다(버그 아님, 실행 근거는
+  `docs/log/DEVLOG.md` Day 4 항목 참고).
 - **무음 타이머(~1.2초) 위치와 판단 기준(둘 다 사람 확인 후 결정)**:
   - 위치: `WebSpeechInputEngine`(어댑터) 내부가 아니라 로직 레이어
     (`src/state-machine/silenceTimer.ts` + 이를 사용하는 `useConversationMachine.ts`)에 둠 —
@@ -78,6 +86,17 @@
   `TEXT_SUBMITTED` 이벤트를 발생시켜 무음 타이머 없이 바로 `sending`으로 전환한다 — PRD 4장이
   명시한 "전송 버튼/Enter가 곧 턴 종료 신호이므로 무음 감지 로직이 필요 없다"는 설계를 그대로
   구현. `WebSpeechInputEngine`을 전혀 참조하지 않는다(미지원 폴백이므로 애초에 쓸 대상이 없음).
+- **`StreamingIndicator`(스트리밍 중 표시, Day 4)**: `sending`/`streaming`에서만 렌더링 —
+  가시성 규칙을 컴포넌트 자체에 내장하는 `ResumeSpeakingButton`과 동일한 패턴. PRD 컴포넌트
+  목록에 별도의 "로딩 표시" 컴포넌트가 없어서, 응답 대기(`sending`)와 토큰 수신(`streaming`)을
+  문구만 다르게 하나의 컴포넌트로 묶었다.
+- **`ErrorBanner`(에러 + 재시도, Day 4)**: `state.error`가 있을 때만 렌더링. "재시도"는 실패한
+  요청을 자동으로 다시 보내지 않고 `useConversationMachine`의 기존 `stop()`(엔진 정지 + 스트림
+  abort + `RESET`)을 그대로 재사용해 `idle`로만 되돌린다 — 사용자 모르게 API가 한 번 더 나가는
+  것을 피하기 위한 선택(사람 확인 없이 결정, 낮은 리스크, `docs/log/DECISIONS.md` 참고).
+- **`EmptyState`(빈 화면, Day 4)**: `status === 'idle'`일 때만 렌더링. 리듀서상 `idle`은 초기
+  상태 또는 `RESET` 직후뿐이라 `transcript`/`assistantText`가 항상 비어 있으므로, 별도의
+  "내용이 비었는지" prop 없이 `status`만으로 판단해도 충분하다.
 - **엔진 의존성 주입**: `useConversationMachine(engineFactory)`가 엔진을 팩토리로 받는다(기본값
   `WebSpeechInputEngine`). PRD 3장의 "mock 구현으로 교체해도 상태머신이 무변경으로 동작하는지
   확인" 요구사항을 실제로 만족시키기 위한 설계 — 다른 `SpeechInputEngine` 구현체(mock, 나중엔
@@ -120,7 +139,33 @@
      받아 PRD 11장 스코프 축소(수동 버튼 방식)는 발동하지 않기로 함(사람 확인, 표본이 많지
      않으니 Day 6~7 데모 준비 중 추가 확인 권장).
 
-## 4. 어댑터 분리 설계 근거
+## 4. LLM 스트리밍 연동 설계 근거
+
+`claudeProxy.ts`는 "상태관리"도 아니고 PRD 7장이 정의한 3개 어댑터(`SpeechInputEngine`/
+`SpeechOutputEngine`/`ReminderEngine`)도 아닌 별도 관심사(LLM 프록시 클라이언트 — ARCHITECTURE.md
+분류상 로직 레이어)라 독립된 장으로 둔다.
+
+- **`claudeProxy.ts`의 역할과 경계**: `api/claude-stream.ts`(Vercel Serverless Function)가
+  내려주는 SSE 형식(Anthropic SDK 원본 이벤트를 `data: {...}\n\n`로 중계, `[DONE]`으로 종료)에
+  맞춰 fetch+`ReadableStream` 파싱만 담당한다. `ANTHROPIC_API_KEY`는 존재조차 참조하지 않아
+  "API 키는 서버만 다룬다"는 경계(PRD 5장)를 그대로 지킨다. 형식 확인 방법과 파싱 구현 상세는
+  `docs/rules/ARCHITECTURE.md` 참고.
+- **에러 타입 재사용**: `ClaudeStreamError`는 별도 taxonomy를 새로 만들지 않고 `SpeechInputError`
+  를 그대로 구현한다 — `ConversationMachineState.error` 슬롯 하나로 마이크/LLM 에러를 함께
+  다루기 위함(근거: `docs/log/DECISIONS.md`).
+- **스트리밍 트리거는 이벤트 발생 지점에서 직접 호출**: `state.status === 'sending'`을
+  `useEffect`로 감지해 트리거하면, 그 안의 `dispatch(STREAM_STARTED)`가 자기 자신의 의존성을
+  바꿔 React가 effect를 cleanup(→ 방금 만든 요청을 abort)했다가 재실행하는 자기 취소 문제가
+  생긴다. `start()`/`stop()`과 동일하게 `SILENCE_TIMEOUT`/`TEXT_SUBMITTED`가 발생하는 자리에서
+  직접 `runSendCycle()`을 호출하는 방식으로 설계했다(원인 분석은 `docs/rules/ARCHITECTURE.md`
+  참고).
+- **대화 히스토리 윈도잉**: 상태머신(리듀서) 밖, `useConversationMachine`의 `historyRef`에 최근
+  대화를 쌓아두고 매 전송마다 최근 `HISTORY_WINDOW_TURNS`(=3턴)만 슬라이스해 요청에 포함한다
+  (PRD 8장 비용 통제 원칙). 리듀서가 아니라 hook에 둔 이유: "지금 화면 상태가 뭔지"(상태머신의
+  책임)와 "서버로 보낼 메시지 목록"(비용 통제 관심사)은 서로 다른 관심사라서 분리했다. N=3의
+  근거는 `docs/log/DECISIONS.md` 참고.
+
+## 5. 어댑터 분리 설계 근거
 
 ### `SpeechInputEngine` → `WebSpeechInputEngine` (Day 3)
 
@@ -269,11 +314,11 @@
   만들지 않기 위한 선택, 사용자 확인 후 결정 (`docs/log/DECISIONS.md` 참고). Day 3+에서
   `ConversationScreen`이 생기면 `handleStartNow`를 실제 네비게이션으로 교체해야 함.
 
-## 5. 상태 갤러리 라우트
+## 6. 상태 갤러리 라우트
 
 - 링크/경로: 
 - 커버하는 상태 목록: idle / listening / streaming / error / empty / 권한거부 등
 
-## 6. MVP vs 스트레치 스코프 판단 근거
+## 7. MVP vs 스트레치 스코프 판단 근거
 
 *(작성 예정 — 실제로 무엇을 자르거나 유지했는지, `docs/log/DECISIONS.md` 링크)*

@@ -406,10 +406,196 @@
 
 ## Day 4 — LLM 스트리밍
 
-- 요청 내용:
+- 요청 내용: (1) `src/api/claudeProxy.ts` — `api/claude-stream.ts`(Day 1에 검증된 서버 프록시)를
+  호출하는 클라이언트 함수. 서버 코드를 직접 읽어 실제 SSE 형식을 확인한 뒤 그 형식에 맞춰
+  파싱(추측 금지). (2) 상태머신에 `sending → streaming → listening` 추가 — `assistant_speaking`
+  처리 방식은 임의로 정하지 말고 먼저 확인. (3) 대화 히스토리 윈도잉(PRD 8장) — N을 임의로
+  정하지 말고 제안 후 확인. 이번 단계는 `SpeechInputDemo`(임시 디버그 컴포넌트)를 확장하는
+  선에서만 진행하고 `ChatMessageList`/`ChatBubble` 등 정식 UI는 Day 5로 미룸.
 - 완료 사항:
-- DoD 체크: [ ] 마이크/텍스트 입력 → 실제 스트리밍 렌더링 확인
+  - **사람 확인 후 결정한 것 3가지**(근거는 `docs/log/DECISIONS.md` 2026-08-25 항목들 참고):
+    1. `assistant_speaking`은 이번에도 제외 — TTS 어댑터(Day 5)가 없어 지금 추가하면 미완성
+       상태가 됨. `streaming → listening`으로 직결.
+    2. 히스토리 윈도잉 N = 3턴(메시지 6개)으로 시작, 실사용해보고 5턴으로 조정 가능하게
+       `HISTORY_WINDOW_TURNS` 상수 하나로 분리.
+    3. 로컬 개발 중 `/api/claude-stream` 연결 방식 — Vercel 계정 연동(`vercel dev`)은 실제
+       배포 시점(Day 6~7)으로 미루고, 지금은 Day 1의 `verify-claude-stream.ts` 패턴을 재사용한
+       상주형 로컬 서버(`scripts/dev-api-server.ts`) + `vite.config.ts`의 `server.proxy`로 우회.
+  - `src/api/claudeProxy.ts`: `api/claude-stream.ts`를 직접 읽어 확인한 형식(Anthropic SDK 원본
+    이벤트를 그대로 `data: {...}\n\n`로 중계, `[DONE]`으로 종료, 에러 시
+    `data: {"type":"error",...}`)에 맞춰 fetch+`ReadableStream`으로 SSE 파싱(MDN "Using readable
+    streams" 기준, 청크 경계 버퍼링 포함). `[DONE]` 없이 스트림이 끊기면 네트워크 에러로 처리.
+    `AbortController`로 취소한 경우는 `ClaudeStreamError`로 감싸지 않고 그대로 전달.
+  - `src/state-machine/types.ts`/`conversationReducer.ts`: `streaming` 상태와
+    `STREAM_STARTED`/`STREAM_DELTA`/`STREAM_DONE`/`STREAM_ERROR` 이벤트 추가.
+    `assistantText` 필드 신설(사용자 발화 `transcript`와 분리).
+  - `src/state-machine/useConversationMachine.ts`: 최근 대화를 `historyRef`에 쌓아두고 매 전송마다
+    최근 3턴만 슬라이스해 `claudeProxy`를 호출하는 `runSendCycle()` 추가.
+    **버그 발견 및 수정**: 처음엔 `useEffect(deps: [state.status])`로 "`sending` 진입"을 감지해
+    스트리밍을 트리거했는데, 그 안의 `dispatch(STREAM_STARTED)`가 `status`를 바꾸는 순간 React가
+    같은 effect를 cleanup(→ 방금 만든 `AbortController.abort()`)했다가 재실행해 방금 보낸 요청을
+    스스로 취소하는 버그였다(Playwright로 `net::ERR_ABORTED` 실제 확인). `start()`/`stop()`과
+    동일한 기존 패턴(이벤트 발생 지점에서 직접 함수 호출)으로 바꿔 해결 — 상세 원인은
+    `docs/rules/ARCHITECTURE.md` 참고.
+  - `src/components/SpeechInputDemo/SpeechInputDemo.tsx`: AI 응답을 `aria-live`로 노출하는
+    임시 표시 영역 추가(정식 `ChatMessageList`/`ChatBubble`은 Day 5에서 `ConversationScreen`과
+    함께 조립 예정, 이번엔 만들지 않음).
+  - `scripts/dev-api-server.ts`(신규, 배포 대상 아님): `api/claude-stream.ts` 핸들러를 상주
+    Node 서버로 감싸 로컬 개발 중 실제 Claude API 스트리밍을 확인할 수 있게 함.
+    `vite.config.ts`에 `/api → localhost:3301` proxy 추가, `package.json`에 `dev:api` 스크립트
+    추가.
+  - `scripts/verify-claude-proxy-parsing.ts`(신규, `npm run verify:claude-proxy`): 가짜
+    fetch/ReadableStream을 주입해 SSE 파싱을 결정론적으로 검증 — 청크가 이벤트 JSON 한복판에서
+    잘리는 경우, 서버 에러 이벤트, HTTP 레벨 실패, `[DONE]` 없이 끊긴 경우, `AbortError` 전달
+    방식까지 5개 시나리오 8개 체크 전부 PASS.
+  - **실제 실행 검증(Playwright + 실제 Claude API, 로컬 프록시 경유)**:
+    1. 텍스트 입력 경로: 미지원 브라우저 재현(Day 3와 동일 기법) 후 텍스트 전송 →
+       `sending`/`streaming`을 거쳐 실제 Claude 응답이 화면에 반영되고 `listening`으로 복귀
+       확인. AI 응답 문단이 한 번에 나타나지 않고 서로 다른 타임스탬프(+125ms, +1033ms,
+       +1238ms)에 걸쳐 점진적으로 길어지는 것을 실측 — 통짜 응답이 아니라 진짜 토큰 스트리밍임을
+       확인.
+    2. 마이크 경로: Day 3에서 검증에 쓴 것과 동일한 가짜 `SpeechRecognition` 생성자로 "발화 후
+       침묵"을 재현 → 무음 1.2초 뒤 자동으로 `sending/streaming` 전환 → 실제 Claude 응답
+       스트리밍까지 완주 확인(응답 예: "바다가 파란 것은 주로 두 가지 이유 때문입니다: ...").
+       페이지 에러 0건.
+    3. `npm run verify:silence-timer`(Day 3 회귀 스위트, 21개 케이스) 재실행 — 전부 PASS, 기존
+       5개 상태 전이 회귀 없음 확인.
+    4. API 키 미노출 자체 점검: `src/` 코드 전체에서 `ANTHROPIC_API_KEY`/`apiKey` 참조 없음(클라
+       이언트는 `/api/claude-stream`만 호출), `npm run build` 산출물(`dist/`)에 실제 키 값과
+       `sk-ant-` 패턴 둘 다 없음을 grep으로 확인.
+    5. `npx tsc -b`, `npm run lint` 통과. 새 경고 1건 추가(`useConversationMachine.ts`의
+       `useRef(createSilenceTimer(handleSilenceTimeout))`를 "렌더 중 ref 접근"으로 오탐 —
+       `createSilenceTimer`가 콜백을 `setTimeout` 안에서만 부른다는 걸 코드로 확인해 정적 분석
+       오탐으로 판단, 기존 1건과 같은 기준으로 주석 남기고 유지) — 기존 1건과 합쳐 총 2건.
+- DoD 체크: **[x] 마이크/텍스트 입력 → 실제 Claude 응답이 타이핑되듯 스트리밍 렌더링 (양쪽
+  경로 모두 실제 API로 확인 완료)**.
 - 이슈/메모:
+  - `ChatMessageList`/`ChatBubble` 등 정식 채팅 UI는 이번에 만들지 않음 — `SpeechInputDemo`가
+    여전히 임시 디버그 컴포넌트 역할. Day 5에서 `ConversationScreen`과 함께 정식 조립 예정.
+  - `stop()`(중지/초기화) 및 언마운트 시 진행 중인 스트리밍 요청도 `AbortController`로 취소하게
+    해뒀다(비용 통제 차원 — 화면을 벗어나도 API 호출이 배경에서 계속 도는 낭비를 막음).
+  - "이어서 말하기" 버튼을 `sending` 상태에서 누르는 경우, 이론적으로는 이미 나간 API 요청을
+    취소하지 않고 응답을 버리기만 한다 — 다만 `STREAM_STARTED` 디스패치가 `sending → streaming`
+    으로 사실상 동기적으로 바뀌어(같은 자바스크립트 태스크 안에서 처리) 사람이 버튼을 누를 수
+    있는 시점엔 이미 `streaming`으로 넘어가 있어 버튼 자체가 안 보인다(가시성 규칙이
+    `user_speaking`/`sending`에서만 노출). 실질적으로 발생하기 어려운 경계 케이스라 이번엔 별도
+    취소 로직을 추가하지 않음.
+
+### 후속 — `StreamingIndicator`/`ErrorBanner`/`EmptyState` 완성 (2026-08-25)
+
+- 요청 내용: PRD 6장 컴포넌트 목록·Day 4 "로딩·에러·빈 화면 컴포넌트 완성"에 따라 세 컴포넌트
+  신설. 스트리밍 연동을 `SpeechInputDemo`에 최소한으로 배선. 네트워크 끊김 재현 방법이 불확실하면
+  지어내지 말고 검증된 방법만 사용.
+- 완료 사항:
+  - `src/components/ConversationScreen/StreamingIndicator.tsx`(신규): `sending`/`streaming`에서만
+    노출, 응답 대기/토큰 수신 중 문구를 구분.
+  - `src/components/ConversationScreen/ErrorBanner.tsx`(신규): 에러 메시지 + "재시도" 버튼.
+    "재시도"는 실패한 요청을 자동으로 다시 보내지 않고 `stop()`(기존 함수 재사용)으로 idle까지만
+    되돌린다(사람 확인 없이 결정, 낮은 리스크, `docs/log/DECISIONS.md` 참고).
+  - `src/components/ConversationScreen/EmptyState.tsx`(신규): `idle`에서만 노출.
+  - `SpeechInputDemo.tsx`: 기존 ad-hoc 에러 문구 두 벌(권한거부/일반 에러)을 `ErrorBanner` 하나로
+    통합, `EmptyState`/`StreamingIndicator` 배선.
+  - **부수적으로 발견한 버그**: 텍스트 폴백 모드에서 LLM 스트리밍이 실패해 `error` 상태가 되면,
+    리듀서가 `error`에서의 `TEXT_SUBMITTED`를 무시해(불가능한 전이 차단) 사용자가 다시 입력해도
+    복구할 방법이 전혀 없었다 — `ErrorBanner`의 재시도 버튼이 idle로 되돌려 함께 해결.
+  - **`claudeProxy.ts` 에러 분류 보정**: `page.route().abort()`로 네트워크 끊김을 재현하는 과정에서,
+    순수 `fetch()` 실패(Response를 아예 못 받는 경우, TypeError)가 `network`가 아니라 `unknown`
+    으로 잘못 분류되던 것을 발견 — `fetch()` 호출을 try/catch로 감싸 `AbortError`는 그대로
+    통과시키고 나머지는 `network` 사유로 매핑하도록 수정. `scripts/verify-claude-proxy-parsing.ts`
+    에 회귀 케이스 추가(총 6개 시나리오).
+  - **실제 실행 검증(Playwright)**: (1) 첫 진입 시 `EmptyState` 노출 확인. (2) 네트워크 끊김은
+    Playwright 공식 API `page.route(url, route => route.abort())`로 재현(브라우저 devtools
+    오프라인 토글을 코드로 결정론적으로 재현하는 공식 방법) → `ErrorBanner` 노출 + 사유가
+    정확히 `network`로 분류됨을 확인. (3) 재시도 클릭 → idle 복귀, `EmptyState` 재노출 확인.
+    (4) `page.unroute()`로 네트워크 복구 후 재입력 → 실제 Claude 스트리밍 응답까지 정상 완주
+    (자동 재전송이 아니라 사용자가 직접 재시도한 것임을 확인). (5) `StreamingIndicator` 문구가
+    `sending`/`streaming` 동안 정상 노출됨을 확인. (6) 마이크 경로(Day 3와 동일한 가짜
+    `SpeechRecognition`)도 회귀 없이 정상 동작 재확인. 전 과정 페이지 에러 0건.
+  - `npm run verify:claude-proxy`(6개 시나리오), `npm run verify:silence-timer`(21개 케이스)
+    모두 PASS. `npx tsc -b`, `npm run lint` 통과(경고는 기존 2건과 동일, 신규 없음). 프로덕션
+    빌드(`dist/`)에 API 키 미노출 재확인.
+- DoD 체크: 해당 없음(Day 4 DoD 자체는 이미 통과 — 이번은 Day 4 지시사항 중 남아 있던
+  "로딩·에러·빈 화면 컴포넌트 완성" 항목을 마저 채운 후속 작업).
+- 이슈/메모:
+  - `TextInputFallback`은 `error` 상태에서도 폼 자체는 그대로 보인다 — 제출해도 리듀서가
+    무시(no-op)할 뿐 에러가 나거나 이상 동작하진 않는다. 입력을 아예 비활성화하는 것까지는
+    이번 범위 밖으로 판단(과설계 방지) — 필요하면 알려주면 추가.
+
+### 후속 — Day 4 DoD 실행 검증 (2026-08-25)
+
+- 요청 내용: Day 4 DoD("마이크/텍스트 입력 → 실제 Claude 응답이 타이핑되듯 스트리밍 렌더링")를
+  "될 것 같다"로 넘어가지 말고 실제 실행 결과(콘솔 로그/스크린샷/자동화 테스트)로 증명. 마이크
+  경로는 Day 3처럼 자동화 가능한 부분과 실기기가 필요한 부분을 정직하게 구분.
+- 검증 방법과 그 한계(정직하게 구분, Day 3와 동일한 원칙):
+  - **자동화로 검증한 것**: 로컬 API 서버(`dev-api-server.ts`, 실제 Anthropic API 키 사용) +
+    Vite dev 서버를 실제로 띄우고, Playwright로 브라우저를 조작해 실제 네트워크 요청이
+    `/api/claude-stream` → 로컬 프록시 → Anthropic API로 나가고 실제 응답이 돌아오는 전 과정을
+    확인. 페이지 안에 `MutationObserver`를 심어 Node 쪽 폴링 주기에 좌우되지 않는, React가 실제로
+    DOM에 커밋한 모든 변화를 `performance.now()` 타임스탬프와 함께 기록(외부 폴링보다 엄격한
+    증거 — 짧게 지나가는 상태도 폴링 주기 때문에 놓치는 일이 없음).
+  - **텍스트 입력 경로**: 마이크 없이 끝까지 자동화로 검증 가능(미지원 브라우저 재현 →
+    `TextInputFallback` 사용). **실제 실행 결과**:
+    ```
+    t=0ms    status="상태: 대기 중"
+    t=112ms  status="상태: AI 응답 스트리밍 중…" aiTextLength=4
+    t=752ms  aiTextLength=5
+    t=1061ms aiTextLength=43
+    t=1379ms aiTextLength=95
+    t=1636ms aiTextLength=135
+    t=1644ms status="상태: 듣는 중…" aiTextLength=135
+    ```
+    AI 응답 텍스트 길이가 5회에 걸쳐 4→5→43→95→135자로 단조 증가(되감기 없음) — 통짜 응답이
+    아니라 진짜 토큰 단위 스트리밍이라는 직접 증거. 최종 응답("# 야외 활동 추천 1. 산책이나
+    등산...")이 화면에 정확히 반영되고 `listening`으로 자동 복귀. 스크린샷 3장(초기
+    EmptyState/스트리밍 중/완료 후) 확보, 콘솔 페이지 에러 0건.
+  - **마이크 입력 경로**: Day 3와 동일한 가짜 `SpeechRecognition` 생성자(실제 브라우저 이벤트
+    계약과 동일한 모양)로 "발화 2회 → 침묵"을 재현. **실제 실행 결과**:
+    ```
+    t=75ms   status="상태: 듣는 중…"
+    t=79ms   status="상태: 발화 인식 중"
+    t=229ms  status="상태: 발화 인식 중"          ← 마지막 interim
+    t=1432ms status="상태: AI 응답 스트리밍 중…" aiTextLength=4   ← 무음 1203ms 후 진입(목표 1200ms)
+    t=2096ms ~ t=3846ms: aiTextLength 5→42→66→105→141→182→204로 단조 증가
+    t=3858ms status="상태: 듣는 중…"
+    ```
+    무음 타이머가 정확히 목표 시간(~1.2초) 근처에서 작동해 `sending/streaming`으로 진입했고,
+    AI 응답이 9단계에 걸쳐 점진적으로 채워진 뒤 자동으로 `listening` 복귀. 스크린샷 4장(초기/
+    발화 인식 중/스트리밍 중/완료 후) 확보, 콘솔 페이지 에러 0건.
+  - **흥미로운 발견 — `sending` 상태가 화면(DOM)에는 별도 프레임으로 안 보임**: 텍스트/마이크
+    경로 둘 다, `TEXT_SUBMITTED`(또는 `SILENCE_TIMEOUT`) 디스패치 직후 같은 동기 실행 흐름
+    안에서 곧바로 `STREAM_STARTED`가 디스패치돼 `sending → streaming`이 일어난다. React
+    18+의 자동 배칭(automatic batching)이 이 두 상태 업데이트를 하나의 커밋으로 묶어버려서,
+    `sending` 상태는 화면에 한 프레임도 그려지지 않고 곧장 `streaming`으로 넘어간다. **버그
+    아님** — `sending` 전이 자체는 `npm run verify:silence-timer`의 리듀서 단위 테스트
+    ("idle에서 TEXT_SUBMITTED → 바로 sending, transcript 반영" 등)로 이미 결정론적으로
+    증명돼 있고, 로직은 정확히 의도대로 동작한다. 단지 사람 눈에 "전송 중…" 문구가 보일 새 없이
+    바로 "스트리밍 중…"으로 바뀌는 것뿐 — 오히려 응답이 그만큼 빠르다는 뜻이라 UX상으로도
+    문제 없음.
+  - **자동화로 검증할 수 없는 것(정직하게 명시, Day 3와 동일한 환경 제약)**: 위 마이크 경로
+    검증은 "우리 코드가 브라우저의 `SpeechRecognition` 이벤트 계약에 정확히 반응하는지"를
+    증명할 뿐, "진짜 사람이 진짜 마이크로 말했을 때"의 인식 품질·무음 판단 체감까지는 증명하지
+    못한다. Playwright가 번들하는 오픈소스 Chromium에는 Google 정식 빌드 전용 음성인식 인증키가
+    없어 실제 음성 입력 자체를 자동화로 재현할 수 없다는 사실이 Day 3에서 이미 확인됐고
+    (`docs/rules/ARCHITECTURE.md` 참고), 이번에도 동일하게 적용된다.
+- **실기기 확인 절차(사람이 직접 해야 하는 부분, Day 3와 같은 형식)**:
+  1. 터미널 2개를 연다. 하나에 `npm run dev:api`(로컬 API 서버, `.env`에 `ANTHROPIC_API_KEY`
+     필요), 다른 하나에 `npm run dev`(Vite 앱)를 실행한다.
+  2. Chrome으로 `http://localhost:5173`(또는 표시된 포트)을 연다.
+  3. "마이크 테스트 시작" 클릭 → 마이크 권한 허용.
+  4. 아무 문장이나 말해본다 — "발화 인식 중" 상태와 실시간 인식 텍스트가 화면에 뜨는지 확인.
+  5. 말을 멈추고 1.2초 정도 기다린다 — 상태가 "전송 중…"을 (아마 순식간에 지나쳐) "AI 응답
+     스트리밍 중…"으로 자동 전환되고, 그 아래 "AI: " 문단에 실제 Claude 응답이 한 글자씩
+     타이핑되듯 채워지는지 확인한다. 다 끝나면 자동으로 "듣는 중…"으로 돌아와야 한다.
+  6. (선택) 크롬 개발자도구 Network 탭에서 `claude-stream` 요청을 선택해 응답이 청크 단위로
+     여러 번에 걸쳐 들어오는지 확인하면 더 확실한 증빙이 된다(Day 7 데모 녹화에도 필요한 화면).
+  7. 이상하게 느껴지면(응답이 한 번에 통째로 나타나거나, 멈추거나, 에러가 뜨면) 그대로 알려주면
+     원인을 파고든다 — 절대 "될 것 같다"로 넘어가지 않는다.
+- DoD 체크: **[x] 마이크/텍스트 입력 → 실제 Claude 응답이 타이핑되듯 스트리밍 렌더링 —
+  MutationObserver 기반 타임라인 + 스크린샷으로 재확인 완료. 다만 실제 사람 음성 인식 품질/
+  체감은 위 절차대로 사람이 직접 확인 필요(자동화 환경의 근본적 한계, Day 3와 동일).**
+- 이슈/메모:
+  - 검증에 쓴 스크린샷·타임라인 로그는 세션 스크래치패드에만 남아 있고 저장소에는 커밋하지
+    않음(바이너리 산출물, 재현 가능한 검증 스크립트가 근거로 충분하다고 판단).
 
 ## Day 5 — TTS & 자동 사이클 완성
 

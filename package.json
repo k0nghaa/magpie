@@ -9,7 +9,9 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "verify:stream": "tsx scripts/verify-claude-stream.ts",
-    "verify:silence-timer": "tsx scripts/verify-silence-timer-logic.ts"
+    "verify:silence-timer": "tsx scripts/verify-silence-timer-logic.ts",
+    "verify:claude-proxy": "tsx scripts/verify-claude-proxy-parsing.ts",
+    "dev:api": "tsx scripts/dev-api-server.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",

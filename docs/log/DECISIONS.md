@@ -206,3 +206,80 @@
   붙음 — 우려했던 대로 Experimental 기능이 기대만큼 동작하지 않는 사례로 확인됨. 중요도가
   낮다고 판단해(사람 확인) 코드는 그대로 두고(무해한 설정이라 되돌릴 이유 없음) 더 이상 파고들지
   않기로 함.
+
+### 2026-08-25 Day 4: `assistant_speaking` 상태를 이번 단계에서 제외
+
+- 배경/문제: PRD 6장 상태머신은 `streaming → assistant_speaking → listening`인데, TTS
+  (`SpeechOutputEngine`)는 Day 5에나 생긴다. `assistant_speaking`을 이번에 만들면 "TTS 없이
+  즉시 통과시킬지, 별도로 대기시킬지"를 정할 근거 자체가 없는 상태가 된다.
+- 검토한 대안: (A) 이번엔 만들지 않고 `streaming → listening`으로 직결(Day 5에서 TTS 어댑터가
+  생길 때 `assistant_speaking`을 끼워 넣는다). (B) `assistant_speaking`을 미리 추가하되 TTS 없이
+  즉시(동기적으로) `listening`으로 통과시킨다(Day 5엔 "즉시 통과"를 "TTS onEnd 대기"로 바꾸기만
+  하면 됨).
+- 결정: (A).
+- 이유: 사람 확인받음(Day 3에서 `assistant_speaking`/`streaming`을 함께 보류했던 것과 같은
+  논리 — 아직 안 생긴 어댑터를 위해 상태만 미리 만들면 실제로 도달·검증되지 않는 상태가 된다).
+- 영향받는 범위: `src/state-machine/types.ts`(`ConversationStatus`), `conversationReducer.ts`
+  (`STREAM_DONE`이 바로 `listening`으로 전이).
+
+### 2026-08-25 Day 4: 대화 히스토리 윈도잉 N = 3턴
+
+- 배경/문제: PRD 8장 "최근 N턴만 윈도잉"이라는 원칙만 있고 N의 구체적 숫자는 미지정.
+- 검토한 대안: 3턴(메시지 6개) vs 5턴(메시지 10개).
+- 결정: 3턴로 시작, 실사용 테스트해보고 필요하면 5턴으로 올리기로 함(사람이 명시적으로 "일단
+  3턴으로 여러 번 테스트해보고 추후 5턴 변경 가능하냐"고 확인 후 결정).
+- 이유: 짧은 회화 데모 특성상 3턴이면 최근 맥락은 충분히 유지되고, 비용 통제(PRD 8장) 원칙에
+  가장 유리한 하한값. `HISTORY_WINDOW_TURNS` 상수 하나만 바꾸면 되도록 구현해 변경 비용을
+  낮춰둠.
+- 영향받는 범위: `src/state-machine/useConversationMachine.ts`(`HISTORY_WINDOW_TURNS` 상수).
+
+### 2026-08-25 Day 4: 로컬 개발 중 `/api/claude-stream` 연결 방식 — Vite proxy + 로컬 서버 스크립트
+
+- 배경/문제: `npm run dev`(Vite)는 `api/claude-stream.ts`(Vercel Serverless Function)를 직접
+  서빙하지 못한다. 실제 브라우저에서 스트리밍을 확인하려면 이 경로를 어떻게든 연결해야 하는데,
+  Day 1에서 "Vercel 계정 연동 없이 검증"이라는 원칙을 이미 세워둔 상태였다.
+- 검토한 대안: (A) Day 1의 `verify-claude-stream.ts` 패턴을 재사용해 상주형 로컬 서버
+  (`scripts/dev-api-server.ts`)를 띄우고 `vite.config.ts`의 `server.proxy`로 `/api`를 그쪽으로
+  중계 — 새 도구 설치 없음, 터미널 2개 필요. (B) Vercel CLI(`vercel dev`) 도입 — 공식 도구지만
+  Vercel 계정 로그인/프로젝트 연동이 지금 당장 필요해짐. (C) 로직만 결정론적으로 검증하고 브라우저
+  실연결은 배포 시점으로 미룸 — 이번 Day의 목표("실제로 스트리밍이 되는지 확인") 자체를 못 채움.
+- 결정: (A).
+- 이유: 사람 확인받음. Day 1에서 이미 세운 "계정 연동은 실제 배포 시점(Day 6~7)에만"이라는
+  원칙과 일관되고, 새 의존성이 없으며, `api/claude-stream.ts`는 이미 Vercel 파일 규칙을 그대로
+  따르고 있어 로컬 개발 방식과 무관하게 나중 배포에 영향이 없다.
+- 영향받는 범위: `scripts/dev-api-server.ts`(신규, 배포 대상 아님), `vite.config.ts`
+  (`server.proxy`), `package.json`(`dev:api` 스크립트).
+
+### 2026-08-25 Day 4: LLM 스트리밍 에러도 `SpeechInputError` 타입 재사용
+
+- 배경/문제: `claudeProxy.ts`의 스트리밍 실패(네트워크 끊김, 서버 에러 이벤트, HTTP 실패)를
+  상태머신에 알릴 때 쓸 에러 타입이 필요했다. `ConversationMachineState.error`는 이미
+  `SpeechInputError | null` 하나뿐이다.
+- 검토한 대안: (A) `SpeechInputError`를 그대로 재사용(`ClaudeStreamError`가 이 인터페이스를
+  구현). (B) `LlmStreamError`라는 별도 타입을 새로 만들고 `state.error`를 유니온 타입으로 확장.
+- 결정: (A).
+- 이유: 사람 확인 없이 결정(낮은 리스크로 판단) — `SpeechInputErrorReason`에 이미 이 목적에
+  맞는 `'network'`/`'unknown'`/`'aborted'`가 있어 새 taxonomy가 필요하지 않았고, `state.error`를
+  유니온으로 쪼개면 화면 쪽에서 "이게 마이크 에러인지 LLM 에러인지"를 매번 구분해야 해서 이번
+  단계(임시 디버그 UI)엔 과함. 되돌리기 쉬운 결정이라 이견 있으면 바로 조정 가능.
+- 영향받는 범위: `src/api/claudeProxy.ts`(`ClaudeStreamError` 클래스).
+
+### 2026-08-25 `ErrorBanner`의 "재시도" 동작 — 자동 재전송 없이 idle로만 복귀
+
+- 배경/문제: PRD 4장 "네트워크 끊김/API 오류 → 재시도 버튼, 에러 메시지"에서 "재시도"가 (A)
+  실패했던 요청을 자동으로 다시 보내는 것인지, (B) 상태머신을 정상 상태로 되돌려 사용자가 직접
+  다시 시도하게 하는 것인지 명시돼 있지 않음.
+- 검토한 대안: (A) 마지막으로 실패한 사용자 메시지를 기억해뒀다가 재시도 클릭 시 자동 재전송.
+  (B) `stop()`(엔진/스트림 정리 + `RESET` 디스패치)을 그대로 재사용해 idle로만 되돌리고, 마이크는
+  "마이크 테스트 시작"을, 텍스트는 다시 입력해서 사용자가 직접 재전송.
+- 결정: (B).
+- 이유: 사람 확인 없이 결정(낮은 리스크, 되돌리기 쉬움) — 자동 재전송은 사용자가 모르는 사이에
+  API 호출이 한 번 더 나가는 것이라 비용 통제 원칙(PRD 8장)과 "무슨 일이 일어나는지 명시적으로
+  보여준다"는 프로젝트 기조에 안 맞다고 판단. `stop()`이 이미 엔진 정지/스트림 abort/RESET을
+  전부 처리해주고 있어 재사용만으로 충분했음.
+- 영향받는 범위: `src/components/ConversationScreen/ErrorBanner.tsx`(`onRetry` prop),
+  `src/components/SpeechInputDemo/SpeechInputDemo.tsx`(`onRetry={stop}`).
+- **부수적으로 발견해 함께 고친 버그**: 텍스트 폴백 모드에서 LLM 스트리밍 에러가 나 `error`
+  상태가 되면, 리듀서가 `error` 상태에서의 `TEXT_SUBMITTED`를 무시하도록 되어 있어(불가능한
+  전이 차단 규칙) 사용자가 다시 입력해도 아무 반응이 없었다 — 복구 수단이 전무했던 잠재
+  버그. `ErrorBanner`의 재시도 버튼이 `stop()`으로 idle로 되돌려 이 경로를 함께 복구함.

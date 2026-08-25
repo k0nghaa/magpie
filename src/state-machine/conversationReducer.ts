@@ -3,6 +3,7 @@ import type { ConversationEvent, ConversationMachineState } from './types.ts'
 export const initialConversationState: ConversationMachineState = {
   status: 'idle',
   transcript: '',
+  assistantText: '',
   error: null,
 }
 
@@ -16,7 +17,7 @@ export function conversationReducer(
   switch (event.type) {
     case 'START_LISTENING':
       if (state.status === 'idle' || state.status === 'error') {
-        return { status: 'listening', transcript: '', error: null }
+        return { status: 'listening', transcript: '', assistantText: '', error: null }
       }
       return state
 
@@ -48,12 +49,44 @@ export function conversationReducer(
     case 'TEXT_SUBMITTED':
       if (event.text.trim() === '') return state
       if (state.status === 'idle' || state.status === 'listening' || state.status === 'user_speaking') {
-        return { status: 'sending', transcript: event.text, error: null }
+        return { status: 'sending', transcript: event.text, assistantText: '', error: null }
+      }
+      return state
+
+    // LLM 스트리밍 시작 — sending에서만 의미가 있다. assistantText를 여기서 비워야 한다(이전
+    // 턴의 응답이 남아있는 상태이므로, 그대로 두면 새 응답이 이전 응답 뒤에 이어붙는 것처럼 보임).
+    case 'STREAM_STARTED':
+      if (state.status === 'sending') {
+        return { ...state, status: 'streaming', assistantText: '' }
+      }
+      return state
+
+    // 토큰 단위 델타를 누적한다. streaming 상태에서만 의미가 있고, 그 외(예: 취소 후 늦게
+    // 도착한 델타)는 무시 — 다른 이벤트들과 동일한 "불가능한 전이 차단" 원칙.
+    case 'STREAM_DELTA':
+      if (state.status === 'streaming') {
+        return { ...state, assistantText: state.assistantText + event.text }
+      }
+      return state
+
+    // 스트리밍 완료 → listening으로 복귀(PRD 6장 streaming → assistant_speaking → listening 중
+    // assistant_speaking은 이번 단계에서 생략하기로 확인받음, docs/log/DECISIONS.md 참고).
+    // transcript는 다음 사용자 턴을 위해 비운다.
+    case 'STREAM_DONE':
+      if (state.status === 'streaming') {
+        return { ...state, status: 'listening', transcript: '' }
+      }
+      return state
+
+    // sending(연결 자체 실패)과 streaming(중간에 끊김) 양쪽에서 발생 가능.
+    case 'STREAM_ERROR':
+      if (state.status === 'sending' || state.status === 'streaming') {
+        return { ...state, status: 'error', error: event.error }
       }
       return state
 
     case 'ENGINE_ERROR':
-      return { status: 'error', transcript: state.transcript, error: event.error }
+      return { ...state, status: 'error', error: event.error }
 
     case 'RESET':
       return initialConversationState
